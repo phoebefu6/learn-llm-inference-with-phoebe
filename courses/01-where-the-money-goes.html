@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- social:start -->
+<meta name="description" content="Session 1 of 6. A request is two jobs: prefill reads the whole prompt in one pass and is limited by compute; decode writes one token per step and every step re-reads the model's weights, so it is limited by memory bandwidth. Why the first token and the last token cost what they do, why output tokens are priced higher, and Kiln's real request mix split into a prefill and decode budget.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Learn with Phoebe">
+<meta property="og:title" content="Where the money and the milliseconds go - learn llm inference with phoebe">
+<meta property="og:description" content="Session 1 of 6. Prefill against decode, time to first token against time per token, and why output tokens cost more.">
+<meta property="og:url" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/courses/01-where-the-money-goes.html">
+<meta property="og:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Where the money and the milliseconds go - learn llm inference with phoebe">
+<meta name="twitter:description" content="Session 1 of 6. A request split into prefill and decode, on Kiln's real request mix, in your browser.">
+<meta name="twitter:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<!-- social:end -->
+<title>Session 1 · Where the money and the milliseconds go - learn llm inference with phoebe</title>
+<link rel="stylesheet" href="../assets/style.css?v=1">
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="wrap">
+    <span class="crumb"><a href="../index.html">learn-llm-inference-with-phoebe</a> / Session 1 of 6</span>
+    <button class="btn" id="toggle-all" type="button">Expand all</button>
+    <button class="btn primary" id="zoom-toggle" type="button">Projector zoom: off</button>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Learn LLM Inference and Model Serving with Phoebe · Session 1 of 6</div>
+    <h1>Where the money and the <span class="accent">milliseconds</span> go</h1>
+    <p class="sub">Every request to a language model is two different jobs glued together. First the model reads your whole prompt in one pass, which keeps the GPU's arithmetic busy. Then it writes the answer one token at a time, and for every single token it has to stream all of its weights out of memory again. The first job sets how long the user waits for the first word; the second sets how long the rest takes and why output tokens are priced higher. Tonight we take one request apart and split Kiln's real request mix into the two budgets.</p>
+    <div class="chip-row">
+      <span class="chip level">🟢 Foundations</span>
+      <span class="chip audience">Builders who own the bill</span>
+      <span class="chip audience">No GPU needed</span>
+      <span class="chip time">45 min</span>
+    </div>
+    <div class="agenda">
+      <span class="a1" style="flex:1">0-3 · Welcome</span>
+      <span class="a2" style="flex:4">3-18 · Prefill, decode, the price list</span>
+      <span class="a3" style="flex:5">18-40 · Build-along: split Kiln's request</span>
+      <span class="a4" style="flex:1">40-45 · Q&amp;A</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="section" id="intro">
+    <div class="section-kicker">
+      <span class="klabel">Part 0</span>
+      <h2>Where we start</h2>
+    </div>
+    <p class="lede">Constructed Kiln example. Kiln is an invented B2B software company. Its in-app assistant launched well, and then two charts went the wrong way in the same quarter: the model bill tripled, and the slowest five percent of users (the p95) waited twice as long for the first word of an answer. One large API model answers every request. Maya, Kiln's platform engineer, owns both charts now. Theo, the product lead, wants to know whether the assistant can stay as good while getting cheaper and faster. Kiln, Maya, Theo and every Kiln constant are invented for teaching; the request mix underneath is real, 2,000 public prompts released with the RouteLLM paper, and every number on these pages is computed from it in your browser.</p>
+
+    <div class="legend">
+      <span class="pill">🎫 Clear all three quiz questions to stamp your passport</span>
+      <span class="pill">Live = presented in the 45 minutes</span>
+      <span class="pill">Self-study = the full depth, after class</span>
+      <span class="pill">★ Build-along = do it yourself</span>
+    </div>
+
+    <div class="callout win">
+      <p><strong>★ What you walk out with tonight.</strong> A picture of one request as prefill plus decode, the two latency numbers that matter (time to first token and time per output token) and what drives each, a one-line reason output tokens cost more, and Kiln's request split into a prefill budget and a decode budget that the next five sessions will each attack.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-1">
+    <div class="section-kicker">
+      <span class="klabel">Part 1 · covers prefill and decode</span>
+      <h2>One request, two jobs</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">A model generates text one token at a time, and each new token depends on all the tokens before it. The prompt, though, is already known when the request arrives, so the model can process all of its tokens at once in a single pass. That pass is called prefill. It ends with the first output token. Everything after it is decode: one forward pass per token, each pass producing exactly one more token, until the answer is done.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Timeline of one request. A single wide prefill block processes all 1,300 prompt tokens at once and ends at the first token, which marks time to first token. It is followed by a long row of small decode steps, one per output token, 250 steps for a typical Kiln answer. Each decode step reads all the model's weights from memory again.">
+        <defs>
+          <filter id="p1aSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="11" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p1aHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p1aAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p1aH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p1aL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p1aS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p1aB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p1aN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p1aH" x="30" y="26">ONE REQUEST ON ONE GPU, LEFT TO RIGHT IN TIME</text>
+
+        <g filter="url(#p1aSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="70" width="230" height="64" rx="8" transform="rotate(-0.6 155 102)" fill="url(#p1aHc)"/>
+          <path d="M282 60 L282 150" stroke="#145868" stroke-width="2.6"/>
+          <rect x="300" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <rect x="330" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <rect x="360" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <rect x="390" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <rect x="420" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <rect x="450" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <path d="M486 102 L560 102" stroke-dasharray="3 6"/>
+          <rect x="570" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <rect x="600" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <rect x="630" y="86" width="22" height="32" rx="3" fill="#FDEFE8"/>
+          <path d="M664 60 L664 150" stroke="#B82500" stroke-width="2.6"/>
+          <path d="M40 196 L800 196" marker-end="url(#p1aAr)"/>
+        </g>
+
+        <text class="p1aL" x="155" y="58" text-anchor="middle">prefill: all prompt tokens</text>
+        <text class="p1aS" x="155" y="152" text-anchor="middle">one pass, 1,300 tokens at once</text>
+        <text class="p1aB" x="292" y="172">first token: TTFT</text>
+        <text class="p1aL" x="476" y="72" text-anchor="middle">decode: one token per step</text>
+        <text class="p1aS" x="476" y="140" text-anchor="middle">each step re-reads every weight</text>
+        <text class="p1aL" x="674" y="80">last token</text>
+        <text class="p1aS" x="674" y="98">answer done</text>
+        <text class="p1aS" x="674" y="114">250 steps later</text>
+        <text class="p1aS" x="800" y="216" text-anchor="end">time</text>
+
+        <text class="p1aN" x="30" y="252">Time to first token covers the queue plus prefill. Time per output token is one decode step. They are different budgets.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the first token waits on one big parallel pass; every later token waits on its own small step</figcaption>
+    </figure>
+
+    <details class="card" open>
+      <summary><span class="mode live">Live</span>Two latency numbers, not one<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Serving engines report two numbers and so should you. <strong>Time to first token</strong> (TTFT) is the wait from sending the request until the first word appears: time in the queue plus the prefill pass. <strong>Time per output token</strong> (TPOT, sometimes inter-token latency) is the gap between later tokens: one decode step. Total latency is roughly TTFT plus TPOT times the number of output tokens.</p>
+        <p>They respond to different levers. A longer prompt raises TTFT and barely touches TPOT. A longer answer leaves TTFT alone and multiplies TPOT. A crowded server raises both, through the queue and through bigger batches. When Kiln's p95 first-token time doubled, the honest first question was which of the three moved. Learn Agent Launch treats TTFT and total latency as service levels you set and watch; here we take apart the mechanism behind them (<a href="https://phoebefu6.github.io/learn-agent-launch-with-phoebe/courses/b3-operational-metrics.html">operational metrics ↗</a>).</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>The KV cache, in one paragraph<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Why can decode produce one token per step without re-reading the whole prompt each time? Because prefill saves, for every prompt token and every layer, two vectors called the key and the value. Each decode step adds one more key and value per layer and attends over all the saved ones. That saved store is the KV cache. It is what makes decode cheap in arithmetic, and it is also what fills GPU memory as requests and answers grow. Session 4 measures it in bytes per token and shows how it caps the number of requests one GPU can hold.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-2">
+    <div class="section-kicker">
+      <span class="klabel">Part 2 · covers compute-bound against bandwidth-bound</span>
+      <h2>What each job waits on</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">A GPU has two limits that matter here: how many multiply-adds it can do per second, and how many bytes per second it can move from its memory to its arithmetic units. Prefill does a lot of arithmetic for every weight it reads, because it pushes 1,300 tokens through each weight in the same pass, so it runs into the arithmetic limit. Decode, with one request, pushes one token through each weight, so the arithmetic finishes long before the next weights arrive: it waits on memory bandwidth.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The roofline mechanism for Llama 3.1 8B in BF16 on an NVIDIA L4. 16.1 gigabytes of weights sit in GPU memory and move to the arithmetic units through a 300 gigabytes per second pipe. Prefill reads the weights once and does work for 1,300 tokens. Decode reads the same 16.1 gigabytes to produce a single token, which takes about 90 milliseconds on this model of the GPU.">
+        <defs>
+          <filter id="p1bSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="17" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p1bHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p1bAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p1bH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p1bL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p1bS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p1bB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p1bV { font: 800 18px Inter, sans-serif; fill: #7A1A04; }
+          .p1bN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p1bH" x="30" y="26">LLAMA 3.1 8B, BF16, ON ONE L4: WHERE THE TIME GOES</text>
+
+        <g filter="url(#p1bSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="60" width="200" height="150" rx="10" transform="rotate(-0.5 140 135)" fill="url(#p1bHc)"/>
+          <path d="M250 120 L420 120 M250 150 L420 150" stroke="#145868" stroke-width="2.4"/>
+          <path d="M300 135 L380 135" marker-end="url(#p1bAr)"/>
+          <rect x="430" y="70" width="190" height="130" rx="10" transform="rotate(0.5 525 135)" fill="#FFFFFF"/>
+          <rect x="660" y="60" width="190" height="70" rx="10" transform="rotate(-0.6 755 95)" fill="#FDEFE8"/>
+          <rect x="660" y="146" width="190" height="70" rx="10" transform="rotate(0.6 755 181)" fill="#FFF1E0" stroke="#145868"/>
+          <path d="M626 110 L654 98" marker-end="url(#p1bAr)"/>
+          <path d="M626 160 L654 176" marker-end="url(#p1bAr)"/>
+        </g>
+
+        <text class="p1bL" x="140" y="232" text-anchor="middle">GPU memory: the weights</text>
+        <text class="p1bV" x="140" y="140" text-anchor="middle">16.1 GB</text>
+        <text class="p1bB" x="335" y="104" text-anchor="middle">300 GB/s pipe</text>
+        <text class="p1bS" x="335" y="174" text-anchor="middle">memory bandwidth</text>
+        <text class="p1bL" x="525" y="128" text-anchor="middle">arithmetic units</text>
+        <text class="p1bS" x="525" y="146" text-anchor="middle">121 dense BF16 TFLOPS</text>
+        <text class="p1bL" x="674" y="84">prefill</text>
+        <text class="p1bS" x="674" y="102">1 read, 1,300 tokens of work</text>
+        <text class="p1bS" x="674" y="118">arithmetic is the limit</text>
+        <text class="p1bB" x="674" y="170">decode, one request</text>
+        <text class="p1bS" x="674" y="188">1 read, 1 token of work</text>
+        <text class="p1bS" x="674" y="204">90.3 ms per token here</text>
+
+        <text class="p1bN" x="30" y="276">Modelled: bytes per step / (bandwidth x 0.6) for decode, 2 x parameters x tokens / (TFLOPS x 0.5) for prefill.</text>
+        <text class="p1bN" x="30" y="296">Spec sheet: L4 24 GB, 300 GB/s, 242 BF16 TFLOPS shown with sparsity, half that dense (read 2026-11-08).</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - decode streams all 16.1 GB of weights to make one token, which is why it waits on the pipe and not the arithmetic</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>The arithmetic you can do on a napkin<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Llama 3.1 8B has 8,030,261,248 parameters, computed from the shapes in its published config file: 32 layers, hidden size 4,096, 8 key-value heads. At two bytes each (BF16) that is 16.1 GB. To produce one token alone, the GPU must move all 16.1 GB through a pipe NVIDIA's spec sheet rates at 300 GB/s on an L4. Even at full speed that is over 50 milliseconds; the bench assumes 60 percent of the rated bandwidth is achieved and prints 90.3 ms per token. On an H100 (3.35 TB/s) the same arithmetic prints 8.1 ms.</p>
+        <p>Prefill is the opposite case. Every weight read is used for 1,300 tokens, so the arithmetic, about two operations per parameter per token, becomes the slow part: the bench prints 345 ms to prefill Kiln's mean prompt on an L4 and 42 ms on an H100. These are a model, a roofline, not a measurement. vLLM's own 2024 performance post reports Llama 3 8B generating "1 token every 13 ms under light load", against the bench's 8.1 ms on an H100, so read the model as optimistic.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Google's numbers for a 540-billion-parameter model.</strong> Pope et al. (2022), "Efficiently Scaling Transformer Inference", report "29ms per token during generation (using int8 weight quantization)" at low batch size, and "76% MFU during large-batch-size processing of input tokens". Same model, same hardware, two regimes: generation measured as time per token, input processing measured as how fully the arithmetic units are used. That split is the prefill and decode split.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Why batching is the escape hatch<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>If one decode step reads 16.1 GB to make one token, the same read could make one token for each of 30 requests at almost the same cost, as long as their key-value caches also fit. That is the whole economic case for batching, and it is why a GPU serving one user at a time is mostly idle arithmetic. Session 3 runs the queue and shows the price: bigger batches raise throughput and push the tail of first-token latency out.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-3">
+    <div class="section-kicker">
+      <span class="klabel">Part 3 · covers the price list</span>
+      <h2>Why output tokens cost more</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">API price lists charge per million tokens, with a separate, higher price for output. On OpenAI's list read on 2026-11-08, gpt-4.1 is $2.00 per million input tokens and $8.00 per million output; Anthropic's Claude Sonnet 4.5 is $3 and $15. The ratio is four to five. The mechanism above is the reason: an input token rides along in one parallel pass, while every output token is a full step of its own.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 290" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Kiln's mean request on gpt-4.1. By token count, 1,300 prompt tokens against 250 answer tokens, so output is about one sixth of the tokens. By dollars, the input side is 56.5 percent of the bill and the output side 43.5 percent, because output tokens cost four times as much.">
+        <defs>
+          <filter id="p1cSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="23" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p1cHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+        </defs>
+        <style>
+          .p1cH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p1cL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p1cS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p1cW { font: 800 12px Inter, sans-serif; fill: #FFFFFF; }
+          .p1cN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p1cH" x="30" y="26">KILN'S MEAN REQUEST ON GPT-4.1: TOKENS AGAINST DOLLARS</text>
+
+        <g filter="url(#p1cSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="200" y="60" width="507" height="44" rx="6" fill="url(#p1cHc)"/>
+          <rect x="707" y="60" width="97" height="44" rx="6" fill="#FFF1E0" stroke="#145868"/>
+          <rect x="200" y="150" width="342" height="44" rx="6" fill="#B82500"/>
+          <rect x="542" y="150" width="262" height="44" rx="6" fill="#145868"/>
+        </g>
+
+        <text class="p1cL" x="190" y="80" text-anchor="end">by token count</text>
+        <text class="p1cS" x="190" y="96" text-anchor="end">1,300 in, 250 out</text>
+        <text class="p1cL" x="190" y="170" text-anchor="end">by dollars</text>
+        <text class="p1cS" x="190" y="186" text-anchor="end">$2.00 in, $8.00 out</text>
+        <text class="p1cL" x="214" y="128">prompt tokens</text>
+        <text class="p1cL" x="804" y="128" text-anchor="end">answer</text>
+        <text class="p1cW" x="214" y="177">input 56.5%</text>
+        <text class="p1cW" x="556" y="177">output 43.5%</text>
+
+        <text class="p1cN" x="30" y="232">Token counts: means over 2,000 real RouteLLM prompts and GPT-4 answers (characters / 4), plus Kiln's</text>
+        <text class="p1cN" x="30" y="250">constructed 1,200-token system prompt. Prices: OpenAI list, read 2026-11-08, re-verify.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - one answer token in six, but more than four dollars in ten</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Read your own bill in two lines<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Every provider dashboard splits usage into input and output tokens. Multiply each by its price and you know which lever to pull first. Kiln's split is close to even: 56.5 percent input, almost all of it the 1,200-token system prompt repeated on every request, and 43.5 percent output. That tells Maya two things at once. The repeated prompt is a caching target (session 5), and the answers are a routing and serving target (sessions 2 to 4). A team whose answers are long essays would see the split tilt hard towards output, and caching would matter less.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>The batch discount is the same mechanism, priced.</strong> OpenAI's Batch API, read on 2026-11-08, offers a "50% cost discount compared to synchronous APIs" for work that can wait: "Each batch completes within 24 hours (and often more quickly)". Anthropic's Message Batches carry "a 50 percent discount on both input and output tokens". Requests that can wait can be packed into big batches on the provider's side, which is the cheapest way to run decode. Kiln's nightly summary emails are a candidate; its in-app chat is not.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Long contexts move the balance<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Each decode step also reads the key-value cache of the request it is serving, and that cache grows with every prompt and answer token. At short contexts the weights dominate the read; at long contexts the cache can rival them. That is one reason long-context requests are slower per token and why some price lists charge more above a context threshold. Session 4 shows the KV cache in bytes and the bench lets you watch the step time rise as sequences grow.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="demo-1">
+    <div class="section-kicker">
+      <span class="klabel">Build-along</span>
+      <h2>Split Kiln's request into two budgets</h2>
+      <span class="tag demo">★ 22 min · everyone builds</span>
+    </div>
+    <p class="lede">Constructed Kiln example, real request mix. The widget reads 2,000 real prompts and the big model's real answers from RouteLLM's released dataset (Apache-2.0), adds Kiln's 1,200-token system prompt, and splits the mean request into its prefill side and its decode side, in tokens, in dollars and in GPU time. Change the GPU and watch which numbers move.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Kiln's mean request drawn as two budgets. The prefill budget holds 1,300 prompt tokens, of which 1,200 are the same system prompt every time, and takes 345 milliseconds on an L4 alone. The decode budget holds 250 answer tokens at 90.3 milliseconds each, 22.5 seconds in all. The repeated system prompt points to caching in session 5; the long decode points to routing, batching and quantisation in sessions 2 to 4.">
+        <defs>
+          <filter id="p1dSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="29" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p1dHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p1dAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p1dH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p1dL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p1dS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p1dB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p1dV { font: 800 16px Inter, sans-serif; fill: #7A1A04; }
+          .p1dN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p1dH" x="30" y="26">KILN'S MEAN REQUEST, LLAMA 3.1 8B BF16 ON ONE L4, NOTHING ELSE RUNNING</text>
+
+        <g filter="url(#p1dSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="56" width="360" height="110" rx="10" transform="rotate(-0.4 220 111)" fill="#FFFFFF"/>
+          <rect x="56" y="84" width="250" height="34" rx="5" fill="url(#p1dHc)"/>
+          <rect x="310" y="84" width="74" height="34" rx="5" fill="#FDEFE8"/>
+          <rect x="460" y="56" width="380" height="110" rx="10" transform="rotate(0.4 650 111)" fill="#FFFFFF"/>
+          <path d="M476 102 L824 102" stroke="#B82500" stroke-width="3" stroke-dasharray="2 5"/>
+          <path d="M180 176 L180 214" marker-end="url(#p1dAr)"/>
+          <path d="M650 176 L650 214" marker-end="url(#p1dAr)"/>
+        </g>
+
+        <text class="p1dL" x="56" y="76">prefill budget: 1,300 tokens</text>
+        <text class="p1dS" x="56" y="138">1,200 system prompt, same every time</text>
+        <text class="p1dS" x="56" y="154">+ the user's question</text>
+        <text class="p1dV" x="390" y="146" text-anchor="end">345 ms</text>
+        <text class="p1dL" x="476" y="76">decode budget: 250 tokens</text>
+        <text class="p1dS" x="476" y="138">90.3 ms per token, one at a time</text>
+        <text class="p1dV" x="824" y="146" text-anchor="end">22.5 s</text>
+        <text class="p1dB" x="180" y="232" text-anchor="middle">session 5: cache the repeat</text>
+        <text class="p1dB" x="650" y="232" text-anchor="middle">sessions 2 to 4: route, batch, shrink</text>
+
+        <text class="p1dN" x="30" y="262">Times are the roofline model, one request alone; sessions 3 and 4 add the queue, the batch and the cache.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the prompt is mostly a repeat and the answer is mostly waiting on memory, so each side has its own lever</figcaption>
+    </figure>
+
+    <div class="inf-widget" data-part="mix" data-gpu="L4"></div>
+
+    <div class="steps">
+      <div class="step">
+        <p><strong>Read the token side first.</strong> With the GPU on L4, write down the mean prompt and answer length and the input share of the bill. These three come straight from the real rows and the price list, no model involved.</p>
+        <div class="prompt-box good"><span class="label">★ Step 1 · tokens and dollars</span>Prompt (prefill):   1,300 tokens  (1,200 of them Kiln's system prompt)
+Answer (decode):    250 tokens
+Input share of bill: 56.5%  at gpt-4.1, $2.00 in / $8.00 out</div>
+      </div>
+      <div class="step">
+        <p><strong>Read the time side on the L4.</strong> These are marked modelled on the widget: one request alone on the GPU, roofline arithmetic. Note the ratio in the last tile.</p>
+        <div class="prompt-box good"><span class="label">★ Step 2 · the L4, one request</span>Prefill, whole prompt:     345 ms
+Decode, per answer token:  90.3 ms   (whole answer 22.5 s)
+One decode token costs 340x a prompt token in GPU time.</div>
+      </div>
+      <div class="step">
+        <p><strong>Switch the GPU to H100 and say what changed and what did not.</strong> The token side does not move: it is a property of the traffic. The time side shrinks, decode most of all, because the H100's memory pipe is about eleven times wider.</p>
+        <div class="prompt-box good"><span class="label">★ Step 3 · the H100, one request</span>Prefill:  42 ms
+Decode:   8.1 ms per token   (whole answer 2.02 s)
+Ratio:    249x
+Same 1,300 and 250 tokens. Same 56.5% input share.</div>
+      </div>
+      <div class="step">
+        <p><strong>Write Kiln's two budgets as a line each, and the lever each one points to.</strong> This is Maya's first page; every later session takes one line and attacks it.</p>
+        <div class="prompt-box good"><span class="label">★ Step 4 · Maya's two budgets</span>Prefill budget: 1,300 tokens per request, 1,200 of them identical.
+  Lever: stop paying full price for the repeat (session 5).
+Decode budget: 250 tokens per request, each a full weight read.
+  Levers: send easy requests to a smaller model (session 2),
+  share each weight read across many requests (session 3),
+  make the weights smaller (session 4).</div>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <p><strong>Your numbers will differ.</strong> Swap in your own mean prompt and answer length from a week of logs: the input share and the decode-to-prefill ratio are the two lines worth keeping. If your answers are long and your prompts short, decode dominates and caching will not save much.</p>
+    </div>
+  </section>
+
+  <section class="section" id="exercise">
+    <div class="section-kicker">
+      <span class="klabel">Homework</span>
+      <h2>Before session 2</h2>
+      <span class="tag exercise">30 min</span>
+    </div>
+    <ol>
+      <li><strong>Pull one week of your own usage</strong> and compute your mean input tokens, mean output tokens and the input share of the bill at your provider's list prices.</li>
+      <li><strong>Find your p95 time to first token</strong> and your mean time per output token, if your provider or gateway reports them. Note which one your users complain about.</li>
+      <li><strong>Mark the repeated part of your prompt</strong>: system prompt, tool definitions, policy text. Count its tokens. Session 5 prices it.</li>
+      <li><strong>List ten real requests</strong> and guess which ones a much smaller model could answer well. Session 2 tests that guess on 2,000 rows.</li>
+    </ol>
+  </section>
+
+  <section class="section" id="quiz">
+    <div class="section-kicker">
+      <span class="klabel">Check yourself</span>
+      <h2>Three questions</h2>
+    </div>
+    <p>Clear all three and session 1 gets stamped in your passport.</p>
+
+    <div class="quiz-q" data-answer="1">
+      <p class="qtext">1 · Kiln adds 2,000 tokens of policy text to every prompt. Which latency number rises most?</p>
+      <button class="qopt" type="button">A · Time per output token, because each answer token now costs more</button>
+      <button class="qopt" type="button">B · Time to first token, because prefill has more tokens to push through</button>
+      <button class="qopt" type="button">C · Neither: prompt length does not affect latency</button>
+      <button class="qopt" type="button">D · Total latency only, through the network</button>
+      <p class="qwhy">Prefill processes every prompt token before the first output token can appear, so a longer prompt lengthens time to first token. Decode steps also read a slightly larger key-value cache, so time per token rises a little, but the first-token wait moves most.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="2">
+      <p class="qtext">2 · Why does one decode step take about as long for one request as for a handful?</p>
+      <button class="qopt" type="button">A · The GPU runs one request at a time anyway</button>
+      <button class="qopt" type="button">B · Decode is limited by arithmetic, which batching cannot share</button>
+      <button class="qopt" type="button">C · The step is limited by reading the weights from memory, and one read can serve every request in the batch</button>
+      <button class="qopt" type="button">D · Providers bill per request, not per step</button>
+      <p class="qwhy">With one request, a decode step moves all 16.1 GB of Llama 3.1 8B's BF16 weights to make one token; the arithmetic idles. Several requests can share that same read, which is why batching raises throughput (session 3).</p>
+    </div>
+
+    <div class="quiz-q" data-answer="0">
+      <p class="qtext">3 · On gpt-4.1 Kiln's mean request is 1,300 tokens in and 250 out. Roughly what share of the bill is output?</p>
+      <button class="qopt" type="button">A · About 43.5%, because output tokens are priced four times higher</button>
+      <button class="qopt" type="button">B · About 16%, the share of tokens that are output</button>
+      <button class="qopt" type="button">C · About 80%, because output always dominates</button>
+      <button class="qopt" type="button">D · Exactly half, by design of the price list</button>
+      <p class="qwhy">The widget prints an input share of 56.5%, so output is 43.5%. Output is one token in six, but at $8.00 against $2.00 per million it carries far more than its token share.</p>
+    </div>
+
+    <p class="quiz-score"></p>
+  </section>
+
+  <section class="section" id="official">
+    <div class="section-kicker">
+      <span class="klabel">Sources covered</span>
+      <h2>What this session teaches, and where it came from</h2>
+    </div>
+    <div class="covered">
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">RouteLLM released data, routellm/gpt4_dataset (Apache-2.0)</span><span class="note">2,000 held-out prompts and answers; token counts estimated as characters / 4; every share computed in the browser and matched by an independent Python run</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Pope et al. 2022, Efficiently Scaling Transformer Inference</span><span class="note">Generation latency per token against input-processing utilisation; abstract read at source</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">NVIDIA L4 and H100 spec sheets; Llama 3.1 8B config.json</span><span class="note">Memory, bandwidth and dense BF16 TFLOPS (sparsity figures halved, as the footnote says); layer shapes for the parameter count; read 2026-11-08</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">OpenAI and Anthropic price lists; OpenAI Batch API; Anthropic Message Batches</span><span class="note">Input and output prices and the 50% batch discounts; read 2026-11-08, re-verify before delivery</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">vLLM v0.6.0 performance post (2024)</span><span class="note">"1 token every 13 ms under light load" for Llama 3 8B, used as a sanity check on the roofline model</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">DeepLearning.AI, Efficiently Serving LLMs</span><span class="note">The "Text Generation" lesson shares this session's core; videos and certificate stay with the official short course</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">Kiln, Maya, Theo and the 1,200-token system prompt</span><span class="note">Constructed for teaching; the GPU times are a labelled model, not a measurement</span></div>
+    </div>
+    <p class="mono" style="margin-top:14px">Every fact on this page, and its verification tier, is recorded in the course's source map.</p>
+  </section>
+
+  <section class="cheat" id="cheatsheet">
+    <h3>Session 1 cheat sheet <span>· pin this</span></h3>
+    <div class="grid-2">
+      <div class="cheat-item"><b>Two jobs</b><span>Prefill reads the whole prompt in one pass. Decode writes one token per step.</span></div>
+      <div class="cheat-item"><b>Two numbers</b><span>Time to first token is queue plus prefill. Time per output token is one decode step.</span></div>
+      <div class="cheat-item"><b>Two limits</b><span>Prefill waits on arithmetic. Decode with few requests waits on memory bandwidth.</span></div>
+      <div class="cheat-item"><b>Napkin decode</b><span>Weight bytes / bandwidth is the floor on one token's time, one request alone.</span></div>
+      <div class="cheat-item"><b>Output costs more</b><span>gpt-4.1 $2 in, $8 out; Sonnet 4.5 $3 and $15 (read 2026-11-08). Read your split.</span></div>
+      <div class="cheat-item"><b>Two budgets</b><span>The repeated prompt points to caching; the answer points to routing, batching, smaller weights.</span></div>
+    </div>
+  </section>
+
+  <div class="callout next">
+    <span class="nx-pill">Next session</span>
+    <p>The cheapest decode step is the one a big model never takes. Session 2 routes 2,000 real prompts between a big and a small model at three thresholds and reads the cost against the quality you give up.</p>
+  </div>
+
+  <footer class="pagefoot">
+    <span>Session 1 of 6 · learn-llm-inference-with-phoebe · by Phoebe Fu &nbsp;·&nbsp; 📚 <a href="https://phoebefu6.github.io/learn-with-phoebe/">Learn with Phoebe ↗</a></span>
+    <span><a href="../index.html">← Course home</a> &nbsp;·&nbsp; <a href="02-routing.html">Next: Routing →</a></span>
+  </footer>
+
+</main>
+
+<script src="../assets/inf-sample.js?v=1"></script>
+<script src="../assets/inf-live.js?v=1"></script>
+<script src="../assets/inf-ui.js?v=3"></script>
+<script src="../assets/app.js?v=1"></script>
+</body>
+</html>

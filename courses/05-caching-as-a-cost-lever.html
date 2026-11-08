@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- social:start -->
+<meta name="description" content="Session 5 of 6. Caching as a design decision: lay the prompt out so the repeated part comes first and the provider's prompt cache can hit, reuse the key-value cache of a shared prefix in your own engine (vLLM automatic prefix caching, SGLang RadixAttention), the minimum-length trap, the write premium against the hit rate, and an answer cache whose savings come with stale and wrong answers.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Learn with Phoebe">
+<meta property="og:title" content="Caching as a cost lever - learn llm inference with phoebe">
+<meta property="og:description" content="Session 5 of 6. Prompt layout for prefix hits, KV prefix reuse, the write premium, and the answer cache's wrong answers, priced in your browser.">
+<meta property="og:url" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/courses/05-caching-as-a-cost-lever.html">
+<meta property="og:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Caching as a cost lever - learn llm inference with phoebe">
+<meta name="twitter:description" content="Session 5 of 6. Re-lay out Kiln's prompt for prefix hits and price it on 2,000 real prompts.">
+<meta name="twitter:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<!-- social:end -->
+<title>Session 5 · Caching as a cost lever - learn llm inference with phoebe</title>
+<link rel="stylesheet" href="../assets/style.css?v=1">
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="wrap">
+    <span class="crumb"><a href="../index.html">learn-llm-inference-with-phoebe</a> / Session 5 of 6</span>
+    <button class="btn" id="toggle-all" type="button">Expand all</button>
+    <button class="btn primary" id="zoom-toggle" type="button">Projector zoom: off</button>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Learn LLM Inference and Model Serving with Phoebe · Session 5 of 6</div>
+    <h1>Caching as a <span class="accent">cost lever</span></h1>
+    <p class="sub">Session 1 found that most of Kiln's prompt is the same 1,200 tokens on every request. A cache can stop paying full price for that repeat, but only if the prompt is laid out so the repeat comes first, only if it is long enough to qualify, and only if requests arrive often enough to hit it. Tonight we treat caching as a design decision rather than a line on the invoice: the provider's prompt cache, the same idea inside your own serving engine, and the answer cache that saves the most and is the only one that can hand a user the wrong answer.</p>
+    <div class="chip-row">
+      <span class="chip level">🟠 Deeper</span>
+      <span class="chip audience">Builders who own the bill</span>
+      <span class="chip audience">Runs in the browser</span>
+      <span class="chip time">45 min</span>
+    </div>
+    <div class="agenda">
+      <span class="a1" style="flex:1">0-3 · Welcome</span>
+      <span class="a2" style="flex:4">3-18 · Layout, prefix reuse, answer cache</span>
+      <span class="a3" style="flex:5">18-40 · Build-along: re-lay out Kiln's prompt</span>
+      <span class="a4" style="flex:1">40-45 · Q&amp;A</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="section" id="intro">
+    <div class="section-kicker">
+      <span class="klabel">Part 0</span>
+      <h2>Where we start</h2>
+    </div>
+    <p class="lede">Constructed Kiln example. Kiln's assistant builds each prompt the way most first versions do: a greeting with the user's name and today's date, the user's question, then the long system prompt with Kiln's product rules and tool definitions. Maya has read the provider's caching guide and wants to know what reordering would save, and whether it is worth adding an answer cache on top. The traffic underneath is real: 2,000 prompts and the big model's answers from RouteLLM's released dataset. The 1,200-token system prompt and the hit rates are constructed.</p>
+
+    <div class="legend">
+      <span class="pill">🎫 Clear all three quiz questions to stamp your passport</span>
+      <span class="pill">Live = presented in the 45 minutes</span>
+      <span class="pill">Self-study = the full depth, after class</span>
+      <span class="pill">★ Build-along = do it yourself</span>
+    </div>
+
+    <div class="callout win">
+      <p><strong>★ What you walk out with tonight.</strong> A rule for prompt layout that lets any prefix cache hit, the two conditions that silently stop a cache from engaging, the hit rate below which a write premium loses money, what prefix reuse does to time to first token on your own GPU, and an honest price for an answer cache that includes the wrong answers it serves.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-1">
+    <div class="section-kicker">
+      <span class="klabel">Part 1 · covers prompt layout for prefix hits</span>
+      <h2>The cache matches from the first token</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">A prompt cache stores the work already done on the beginning of a prompt and reuses it when a later prompt begins with exactly the same tokens. Matching starts at token one and stops at the first difference. So a single changing token near the start, a name or a timestamp, makes everything after it a miss, however much of the rest is identical.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 310" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two layouts of the same Kiln prompt. Dynamic first: the user's name and date come first, so two requests differ at the very first block and nothing after it can be reused. Static first: tool definitions and the system prompt, 1,200 tokens, come first and are identical across requests, so they are read from the cache; only the question at the end is new.">
+        <defs>
+          <filter id="p5aSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="51" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p5aHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+        </defs>
+        <style>
+          .p5aH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p5aL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p5aS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p5aR { font: 800 12px Inter, sans-serif; fill: #991B1B; }
+          .p5aG { font: 800 12px Inter, sans-serif; fill: #7A1A04; }
+          .p5aN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p5aH" x="30" y="26">THE SAME 1,300 TOKENS, TWO ORDERS, TWO REQUESTS EACH</text>
+
+        <g filter="url(#p5aSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="30" y="48" width="400" height="200" rx="12" transform="rotate(-0.3 230 148)" fill="#FEF2F2" stroke="#FCA5A5"/>
+          <rect x="48" y="96" width="70" height="30" rx="4" fill="#FFFFFF"/>
+          <rect x="122" y="96" width="60" height="30" rx="4" fill="#FFFFFF"/>
+          <rect x="186" y="96" width="226" height="30" rx="4" fill="#FFFFFF"/>
+          <rect x="48" y="160" width="70" height="30" rx="4" fill="#FFFFFF"/>
+          <rect x="122" y="160" width="60" height="30" rx="4" fill="#FFFFFF"/>
+          <rect x="186" y="160" width="226" height="30" rx="4" fill="#FFFFFF"/>
+          <rect x="450" y="48" width="400" height="200" rx="12" transform="rotate(0.3 650 148)" fill="#FDEFE8" stroke="#B82500"/>
+          <rect x="468" y="96" width="250" height="30" rx="4" fill="url(#p5aHc)"/>
+          <rect x="722" y="96" width="110" height="30" rx="4" fill="#FFFFFF"/>
+          <rect x="468" y="160" width="250" height="30" rx="4" fill="url(#p5aHc)"/>
+          <rect x="722" y="160" width="110" height="30" rx="4" fill="#FFFFFF"/>
+        </g>
+
+        <text class="p5aR" x="48" y="76">✗ Dynamic first: no shared prefix</text>
+        <text class="p5aS" x="83" y="145" text-anchor="middle">name, date</text>
+        <text class="p5aS" x="152" y="145" text-anchor="middle">question</text>
+        <text class="p5aS" x="299" y="145" text-anchor="middle">system prompt, 1,200 tokens</text>
+        <text class="p5aS" x="48" y="214">differs at block 1, so every token is new</text>
+        <text class="p5aS" x="48" y="230">no saving at any hit rate</text>
+
+        <text class="p5aG" x="468" y="76">✓ Static first: tools, system, then messages</text>
+        <text class="p5aL" x="593" y="145" text-anchor="middle">same 1,200 tokens: cached</text>
+        <text class="p5aS" x="777" y="145" text-anchor="middle">question</text>
+        <text class="p5aS" x="468" y="214">identical until the question, so the</text>
+        <text class="p5aS" x="468" y="230">system prompt is read from the cache</text>
+
+        <text class="p5aN" x="30" y="282">Hatched: the part both requests share from token one. Anthropic builds the cache prefix as tools, system, then messages.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - move every changing token after every repeated token, or the cache never sees a repeat</figcaption>
+    </figure>
+
+    <details class="card" open>
+      <summary><span class="mode live">Live</span>What both big providers say about order<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>OpenAI's prompt caching guide, read on 2026-11-08, says caching is "enabled by default for supported OpenAI models" and advises putting "stable developer instructions and shared reference material first", with timestamps and user-specific content at the end. Anthropic's guide says "Cache prefixes are created in the following order: tools, system, then messages", lets you mark "up to 4 cache breakpoints", and keeps an entry for 5 minutes by default. Different mechanics, same rule: the stable part goes first and the changing part goes last.</p>
+        <p>For Kiln that means moving the greeting with the user's name and the date out of the top of the prompt and into the last user message, after the 1,200 tokens of rules and tools. The model sees the same information; the cache sees a repeat.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Two ways a cache silently never engages<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p><strong>Too short.</strong> Providers only cache prefixes above a minimum length. Anthropic's minimum, read on 2026-11-08, is 1,024 tokens for Claude Sonnet 4.5 but 4,096 for Claude Haiku 4.5. Kiln's 1,200-token prefix qualifies on Sonnet and never qualifies on Haiku: the bench prints "The cache never engages" for Haiku 4.5 with the static-first layout, and the cost stays $2.55 per 1,000. OpenAI's minimum is 1,024 tokens for GPT-5.6 and later and "varies by request settings for earlier models".</p>
+        <p><strong>Too rare.</strong> Entries expire. OpenAI keeps in-memory entries for "around 5 to 10 minutes of inactivity, up to one hour"; Anthropic's default is 5 minutes. A prompt seen twice an hour is a miss every time. Low-traffic features, or prompts split into many variants, get little from caching however well they are laid out.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-2">
+    <div class="section-kicker">
+      <span class="klabel">Part 2 · covers the write premium and KV prefix reuse</span>
+      <h2>A cache hit is cheap; a cache write may not be</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">Providers price a cached prefix two ways. OpenAI discounts cached input with no charge for writing it: gpt-4.1's cached input is $0.50 per million against $2.00. Anthropic charges a premium to write the cache and a deep discount to read it: 1.25 times the base input price to write a 5-minute entry and 0.1 times to read it. With a write premium, a cache that rarely hits costs more than no cache at all.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cost per 1,000 Kiln requests on Claude Sonnet 4.5 against the prefix hit rate. With no caching the cost is 7.65 dollars at any hit rate. With the static-first layout the cost falls as hits rise: 8.13 dollars at a 10 percent hit rate, above no caching; 6.48 dollars at 50 percent; 4.82 dollars at 90 percent. The two lines cross at a 21.7 percent hit rate.">
+        <defs>
+          <filter id="p5bSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="53" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+        </defs>
+        <style>
+          .p5bH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p5bL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p5bS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p5bB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p5bV { font: 800 13px Inter, sans-serif; fill: #7A1A04; }
+          .p5bN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p5bH" x="30" y="26">CLAUDE SONNET 4.5, KILN'S TRAFFIC, COST PER 1,000 REQUESTS AGAINST HIT RATE</text>
+
+        <g filter="url(#p5bSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M100 280 L820 280 M100 280 L100 50"/>
+          <path d="M100 113 L820 113" stroke="#145868" stroke-width="2.4" stroke-dasharray="7 5"/>
+          <path d="M172 89 L460 172 L748 255" stroke="#B82500" stroke-width="3"/>
+          <circle cx="172" cy="89" r="6" fill="#FFFFFF" stroke="#B82500"/>
+          <circle cx="460" cy="172" r="6" fill="#FFFFFF" stroke="#B82500"/>
+          <circle cx="748" cy="255" r="6" fill="#FFFFFF" stroke="#B82500"/>
+          <path d="M256 113 L256 280" stroke="#6E4A3F" stroke-width="1.4" stroke-dasharray="3 4"/>
+        </g>
+
+        <text class="p5bB" x="820" y="104" text-anchor="end">no caching: $7.65</text>
+        <text class="p5bV" x="182" y="76">$8.13 at 10%</text>
+        <text class="p5bV" x="472" y="164">$6.48 at 50%</text>
+        <text class="p5bV" x="762" y="260">$4.82 at 90%</text>
+        <text class="p5bL" x="266" y="226">crossover 21.7%</text>
+        <text class="p5bS" x="100" y="298" text-anchor="middle">0%</text>
+        <text class="p5bS" x="820" y="298" text-anchor="end">100% hit rate</text>
+        <text class="p5bS" x="92" y="56" text-anchor="end">$</text>
+
+        <text class="p5bN" x="30" y="324">Write 1.25x, read 0.1x the $3 base input (list price, read 2026-11-08). Computed on 2,000 real prompts.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - below a 21.7% hit rate the write premium costs more than the reads save</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Where the 21.7% comes from<span class="mini">2 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Every miss writes the prefix at 1.25 times the base price; every hit reads it at 0.1 times. Caching beats paying full price when the average multiplier is under 1: hit rate times 0.1 plus miss rate times 1.25 below 1. That solves to a hit rate above 0.25 / 1.15, which the widget prints as 21.7%. At 10% hits Kiln pays $8.13 per 1,000 requests against $7.65 uncached; at 90% it pays $4.82, 37.0% less. On gpt-4.1, with no write premium, any hit at all saves money: $2.98 against $4.60 at 90%.</p>
+        <p>Your hit rate is a property of your traffic, not of the provider: how many requests share the prefix within the cache's lifetime. Read it from the cache-read token counter on your usage reports. Learn AI Observability covers that accounting and the traps in it (<a href="https://phoebefu6.github.io/learn-ai-observability-with-phoebe/courses/a4-what-ai-costs-you.html">what AI costs you ↗</a>, <a href="https://phoebefu6.github.io/learn-ai-observability-with-phoebe/courses/b4-cost-and-latency-per-span.html">cost and latency per span ↗</a>).</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>The same idea inside your own engine<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>When you serve the model yourself, the cache is the key-value cache from session 4, kept after a request ends and reused by the next request with the same prefix. vLLM's automatic prefix caching, read on 2026-11-08: "we hash each kv-cache block by the tokens in the block and the tokens in the prefix before the block", "We only cache full blocks", and the least recently used block is evicted first. SGLang keeps the cache "for both prompts and generation results in a radix tree" with leaf-first eviction (LMSYS blog, 2024), and its paper calls this RadixAttention.</p>
+        <p>Here the saving is not a discount on a bill but prefill you no longer do. On the bench's model of one L4 with FP8 weights, turning the prefix cache on cuts Kiln's p95 time to first token at 0.25 requests a second from 656 ms to 174 ms, and raises the highest load meeting the 1 s target from 0.75 to 1.5 requests a second, which halves the cost per 1,000 requests from $0.30 to $0.15. Modelled, and optimistic: vLLM's own reported speed is slower than the roofline.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Two numbers for one system.</strong> The SGLang paper (Zheng et al., arXiv:2312.07104) reports "up to 6.4x higher throughput compared to state-of-the-art inference systems"; the LMSYS blog post that introduced it reported "up to 5 times higher throughput compared to existing systems". Both are the authors' own benchmarks at different times. Prefix reuse pays most when many requests share long prefixes, agents and few-shot templates especially, and close to nothing when every prompt is unique. Measure your own sharing before you believe either.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-3">
+    <div class="section-kicker">
+      <span class="klabel">Part 3 · covers the answer cache</span>
+      <h2>The cache that can be wrong</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">A prompt cache only reuses work; the model still answers every request fresh. An answer cache, often called a semantic cache, skips the model entirely: it embeds the new question, looks for a stored question that is close enough, and returns that question's stored answer. It saves the whole request, input and output. It is also the only cache here that can return an answer to a question nobody asked.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The answer cache mechanism. A new question is embedded and compared with stored questions. If a stored question is close enough, its stored answer is returned without calling the model; otherwise the model answers and the pair is stored. Two failure paths are marked: the stored answer is stale because the facts changed since it was stored, and the stored question was similar but not the same, so the answer is wrong for the new question.">
+        <defs>
+          <filter id="p5cSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="57" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p5cHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p5cAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p5cH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p5cL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p5cS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p5cR { font: 800 11px Inter, sans-serif; fill: #991B1B; }
+          .p5cN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p5cH" x="30" y="26">AN ANSWER CACHE: A HIT SKIPS THE MODEL, AND SKIPS ITS JUDGEMENT TOO</text>
+
+        <g filter="url(#p5cSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="30" y="110" width="130" height="56" rx="10" transform="rotate(-1 95 138)" fill="#FFFFFF"/>
+          <path d="M166 138 L222 138" marker-end="url(#p5cAr)"/>
+          <rect x="232" y="96" width="170" height="84" rx="10" transform="rotate(0.5 317 138)" fill="url(#p5cHc)"/>
+          <path d="M410 120 L500 80" marker-end="url(#p5cAr)"/>
+          <path d="M410 158 L500 196" marker-end="url(#p5cAr)"/>
+          <rect x="510" y="50" width="200" height="60" rx="10" transform="rotate(-0.5 610 80)" fill="#FDEFE8"/>
+          <rect x="510" y="168" width="200" height="60" rx="10" transform="rotate(0.5 610 198)" fill="#FFFFFF"/>
+          <rect x="730" y="40" width="130" height="90" rx="10" transform="rotate(0.8 795 85)" fill="#FEF2F2" stroke="#FCA5A5"/>
+        </g>
+
+        <text class="p5cL" x="95" y="134" text-anchor="middle">new question</text>
+        <text class="p5cS" x="95" y="152" text-anchor="middle">embedded</text>
+        <text class="p5cL" x="317" y="88" text-anchor="middle">stored questions</text>
+        <text class="p5cS" x="317" y="200" text-anchor="middle">nearest one, how close?</text>
+        <text class="p5cL" x="610" y="76" text-anchor="middle">close enough: hit</text>
+        <text class="p5cS" x="610" y="94" text-anchor="middle">return stored answer</text>
+        <text class="p5cL" x="610" y="194" text-anchor="middle">not close: miss</text>
+        <text class="p5cS" x="610" y="212" text-anchor="middle">model answers, pair stored</text>
+        <text class="p5cR" x="744" y="66">stale: facts</text>
+        <text class="p5cR" x="744" y="82">changed since</text>
+        <text class="p5cR" x="744" y="104">similar, not</text>
+        <text class="p5cR" x="744" y="120">the same question</text>
+
+        <text class="p5cN" x="30" y="266">Longer expiry and a looser "close enough" raise the hit share, and both raise the share of hits that are wrong.</text>
+        <text class="p5cN" x="30" y="284">The bench's two settings are constructed inputs; measure your own on labelled pairs before switching one on.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the answer cache saves the whole request and is the only cache that can hand back a wrong answer</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Price the wrong answers, not only the hits<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>The bench runs Kiln on Claude Sonnet 4.5 with the static-first prompt at 90% prefix hits ($4.82 per 1,000) and then adds an answer cache in two constructed settings. Short expiry, 10% of requests answered from the cache with 2% of those hits wrong: $4.34 per 1,000, 43.3% under no caching, and 2.0 wrong cached answers per 1,000 requests. Long expiry, 25% hits with 8% of hits wrong: $3.61, 52.7% saved, and 20.0 wrong answers per 1,000.</p>
+        <p>Those hit and error rates are invented to show the shape; nobody can tell you yours without labelled pairs from your own traffic. The shape is the lesson: the setting that saves most also serves ten times the wrong answers. Kiln's 95% quality floor from session 2 applies here too: 20.0 wrong per 1,000 is two percentage points of quality spent on a cache, on top of whatever the router already spends.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Where an answer cache is safe<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Exact-match caching of identical requests (same prompt, same parameters, deterministic settings) has no wrong-answer risk beyond staleness and is worth doing for repeated batch jobs. Similarity matching is safest where answers do not depend on who asks or when: public product documentation, help-centre questions, definitions. It is riskiest where a near-identical question has a different answer: account balances, anything with a date, anything personal. Give every entry an expiry tied to how often its source facts change, and log every cached answer served so a wrong one can be traced.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="demo-1">
+    <div class="section-kicker">
+      <span class="klabel">Build-along</span>
+      <h2>Re-lay out Kiln's prompt and price it</h2>
+      <span class="tag demo">★ 22 min · everyone builds</span>
+    </div>
+    <p class="lede">Constructed Kiln example, real traffic. The widget prices the same 2,000 real prompts and big-model answers under each layout, model and hit rate, then adds the answer cache. Work through the steps in order and keep the strings the widget prints.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 290" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Kiln's prompt before and after the re-layout, as stacks of blocks. Before: name and date, question, system prompt and tools, then the answer. After: system prompt and tools first, 1,200 tokens marked cached, then name, date and question, then the answer. The answer block is unchanged in both; only the input side gets cheaper.">
+        <defs>
+          <filter id="p5dSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="59" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p5dHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p5dAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p5dH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p5dL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p5dS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p5dB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p5dN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p5dH" x="30" y="26">KILN'S PROMPT, BEFORE AND AFTER: SAME CONTENT, NEW ORDER</text>
+
+        <g filter="url(#p5dSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="60" y="52" width="300" height="34" rx="5" fill="#FFFFFF"/>
+          <rect x="60" y="92" width="300" height="34" rx="5" fill="#FFFFFF"/>
+          <rect x="60" y="132" width="300" height="34" rx="5" fill="#FFFFFF"/>
+          <rect x="60" y="172" width="300" height="34" rx="5" fill="#FFF1E0" stroke="#145868"/>
+          <path d="M380 129 L490 129" marker-end="url(#p5dAr)"/>
+          <rect x="510" y="52" width="300" height="34" rx="5" fill="url(#p5dHc)"/>
+          <rect x="510" y="92" width="300" height="34" rx="5" fill="#FFFFFF"/>
+          <rect x="510" y="132" width="300" height="34" rx="5" fill="#FFFFFF"/>
+          <rect x="510" y="172" width="300" height="34" rx="5" fill="#FFF1E0" stroke="#145868"/>
+        </g>
+
+        <text class="p5dL" x="76" y="74">greeting: name, date</text>
+        <text class="p5dL" x="76" y="114">user's question</text>
+        <text class="p5dL" x="76" y="154">system prompt + tools, 1,200 tokens</text>
+        <text class="p5dB" x="76" y="194">answer, 250 tokens</text>
+        <text class="p5dS" x="435" y="118" text-anchor="middle">reorder</text>
+        <text class="p5dL" x="526" y="74">system prompt + tools: cached</text>
+        <text class="p5dL" x="526" y="114">greeting: name, date</text>
+        <text class="p5dL" x="526" y="154">user's question</text>
+        <text class="p5dB" x="526" y="194">answer, 250 tokens</text>
+
+        <text class="p5dN" x="30" y="240">The answer is untouched: caching only discounts input. On gpt-4.1, input was 56.5% of Kiln's bill (session 1),</text>
+        <text class="p5dN" x="30" y="258">so 56.5% is the most any prompt cache can ever save there.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - nothing is removed from the prompt; the repeated block moves to the front so the cache can find it</figcaption>
+    </figure>
+
+    <div class="inf-widget" data-part="cache"></div>
+
+    <div class="steps">
+      <div class="step">
+        <p><strong>Price today's layout.</strong> Leave the layout on Dynamic first and the model on Claude Sonnet 4.5. Move the hit rate anywhere: nothing changes, because no two prompts share a first token.</p>
+        <div class="prompt-box good"><span class="label">★ Step 1 · dynamic first, Sonnet 4.5</span>No caching:           $7.65 per 1,000 requests
+With the prompt cache: $7.65
+Verdict: No saving: no two prompts share a prefix</div>
+      </div>
+      <div class="step">
+        <p><strong>Switch to Static first at a 90% hit rate.</strong> The system prompt is now read from the cache on nine requests in ten and written on the tenth.</p>
+        <div class="prompt-box good"><span class="label">★ Step 2 · static first, 90% hits</span>With the prompt cache: $4.82 per 1,000 requests
+Saves 37.0% per request against no caching
+Write premium pays off above: 21.7%</div>
+      </div>
+      <div class="step">
+        <p><strong>Drag the hit rate down to 50%, then 10%.</strong> This is a low-traffic feature, or a prompt split into many variants. At 10% the verdict turns red.</p>
+        <div class="prompt-box good"><span class="label">★ Step 3 · the hit rate decides</span>50% hits: $6.48 per 1,000   (saves 15.3%)
+10% hits: $8.13 per 1,000   Caching costs more: 6.4% above no caching</div>
+      </div>
+      <div class="step">
+        <p><strong>Switch the model to Claude Haiku 4.5 and to gpt-4.1.</strong> Same layout, same 90% hits. Haiku's minimum cacheable length is 4,096 tokens, so Kiln's 1,200-token prefix never qualifies. gpt-4.1 has no write premium.</p>
+        <div class="prompt-box good"><span class="label">★ Step 4 · the minimum and the pricing model</span>Haiku 4.5: The cache never engages ... $2.55 stays $2.55
+gpt-4.1:   $4.60 with no caching, $2.98 with it, saves 35.2%</div>
+      </div>
+      <div class="step">
+        <p><strong>Back on Sonnet 4.5 at 90%, add the answer cache.</strong> Both settings are constructed; read the wrong-answer tile as hard as the price tile.</p>
+        <div class="prompt-box good"><span class="label">★ Step 5 · the answer cache, constructed rates</span>Short expiry: $4.34 per 1,000, saves 43.3%, 2.0 wrong per 1,000
+Long expiry:  $3.61 per 1,000, saves 52.7%, 20.0 wrong per 1,000</div>
+      </div>
+      <div class="step">
+        <p><strong>Write Kiln's caching line for the memo.</strong> Keep the prompt cache, which cannot change an answer; hold the answer cache until it has been measured.</p>
+        <div class="prompt-box good"><span class="label">★ Step 6 · Maya's caching line</span>Re-lay out the prompt static first (tools, system, then messages).
+On gpt-4.1 at 90% prefix hits: $4.60 to $2.98 per 1,000 (35.2%).
+No answer cache until 500 labelled pairs show its wrong-answer rate.
+Watch the cache-read counter weekly; below 21.7% hits on a
+write-premium provider, the cache is losing money.</div>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <p><strong>Your numbers will differ.</strong> Your prefix length, your provider's minimum and your real hit rate decide all of this. Measure the hit rate from a week of usage reports before you promise a saving; the layout change is free, the promise is not.</p>
+    </div>
+  </section>
+
+  <section class="section" id="exercise">
+    <div class="section-kicker">
+      <span class="klabel">Homework</span>
+      <h2>Before session 6</h2>
+      <span class="tag exercise">30 min</span>
+    </div>
+    <ol>
+      <li><strong>Draw your own prompt as blocks</strong> in the order it is sent, and mark the first block that changes between two users. Everything after it is uncacheable today.</li>
+      <li><strong>Check your prefix against your model's minimum</strong> cacheable length on your provider's current caching page.</li>
+      <li><strong>Read your cache-read token counter</strong> for a week and compute your real hit rate. If your provider charges a write premium, compare it with your break-even.</li>
+      <li><strong>Collect 50 pairs of near-identical questions</strong> from your logs and mark which ones need different answers. That count is the beginning of an answer-cache error rate.</li>
+    </ol>
+  </section>
+
+  <section class="section" id="quiz">
+    <div class="section-kicker">
+      <span class="klabel">Check yourself</span>
+      <h2>Three questions</h2>
+    </div>
+    <p>Clear all three and session 5 gets stamped in your passport.</p>
+
+    <div class="quiz-q" data-answer="2">
+      <p class="qtext">1 · Kiln's prompt starts with the user's name and the date, then 1,200 tokens of fixed rules. What does a prompt cache save?</p>
+      <button class="qopt" type="button">A · About 90% of input cost, since most of the prompt repeats</button>
+      <button class="qopt" type="button">B · Only the output cost</button>
+      <button class="qopt" type="button">C · Nothing: matching starts at the first token, which differs on every request</button>
+      <button class="qopt" type="button">D · It depends only on the provider's price</button>
+      <p class="qwhy">A prefix cache reuses work only up to the first differing token. With the name and date first, no two requests share a prefix, and the bench prints no saving at any hit rate until the layout is static first.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="0">
+      <p class="qtext">2 · On Claude Sonnet 4.5 (write 1.25x, read 0.1x), at what prefix hit rate does caching stop losing money?</p>
+      <button class="qopt" type="button">A · Above 21.7%</button>
+      <button class="qopt" type="button">B · Above 50%</button>
+      <button class="qopt" type="button">C · Any hit rate above zero</button>
+      <button class="qopt" type="button">D · Only at 100%</button>
+      <p class="qwhy">Caching wins when hit rate x 0.1 + miss rate x 1.25 is under 1, which is a hit rate above 21.7%. At 10% hits Kiln pays $8.13 per 1,000 against $7.65 uncached. With no write premium (gpt-4.1), any hit saves.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="3">
+      <p class="qtext">3 · Why does the memo hold back the answer cache even though its long-expiry setting saves 52.7%?</p>
+      <button class="qopt" type="button">A · Answer caches are not allowed by providers</button>
+      <button class="qopt" type="button">B · It only saves input tokens</button>
+      <button class="qopt" type="button">C · It makes time to first token slower</button>
+      <button class="qopt" type="button">D · It is the only cache that returns wrong answers, 20.0 per 1,000 in that constructed setting, and Kiln has not measured its real rate</button>
+      <p class="qwhy">Prompt and prefix caches reuse work but the model still answers each request. An answer cache returns a stored answer, which can be stale or meant for a different question. Until its error rate is measured on labelled pairs, its saving is not comparable with the quality it spends.</p>
+    </div>
+
+    <p class="quiz-score"></p>
+  </section>
+
+  <section class="section" id="official">
+    <div class="section-kicker">
+      <span class="klabel">Sources covered</span>
+      <h2>What this session teaches, and where it came from</h2>
+    </div>
+    <div class="covered">
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">OpenAI prompt caching guide; Anthropic prompt caching docs and price list</span><span class="note">Automatic caching, minimum lengths, lifetimes, prefix order, breakpoints, write and read multipliers; read 2026-11-08, re-verify before delivery</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">vLLM automatic prefix caching docs</span><span class="note">Block hashing over the tokens in and before a block, full blocks only, least recently used eviction; read at source</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Zheng et al., SGLang (arXiv:2312.07104); LMSYS SGLang blog 2024</span><span class="note">RadixAttention for KV cache reuse; the paper's "up to 6.4x" and the blog's "up to 5 times", each on its own benchmark</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">RouteLLM released data, routellm/gpt4_dataset (Apache-2.0)</span><span class="note">2,000 real prompts and big-model answers; every cache price computed in the browser and matched by an independent Python run</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">Learn AI Observability, cache accounting</span><span class="note">Cache token counters, invoice traps and break-even accounting are taught there and linked, not repeated</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">Kiln's prompt, hit rates and answer-cache settings</span><span class="note">Constructed for teaching; the self-hosted prefix numbers are the labelled capacity model</span></div>
+    </div>
+    <p class="mono" style="margin-top:14px">Every fact on this page, and its verification tier, is recorded in the course's source map.</p>
+  </section>
+
+  <section class="cheat" id="cheatsheet">
+    <h3>Session 5 cheat sheet <span>· pin this</span></h3>
+    <div class="grid-2">
+      <div class="cheat-item"><b>Static first</b><span>Tools, system, reference text, then anything with a name, a date or a question.</span></div>
+      <div class="cheat-item"><b>Check the minimum</b><span>A prefix under the model's minimum is never cached. Haiku 4.5: 4,096 tokens.</span></div>
+      <div class="cheat-item"><b>Write premium</b><span>At 1.25x write and 0.1x read, caching loses money under a 21.7% hit rate.</span></div>
+      <div class="cheat-item"><b>Ceiling</b><span>A prompt cache only discounts input. Your input share of the bill is the most it can save.</span></div>
+      <div class="cheat-item"><b>Own engine</b><span>Prefix reuse skips prefill: shorter first-token wait, more load per GPU.</span></div>
+      <div class="cheat-item"><b>Answer cache</b><span>Saves the whole request and serves wrong answers. Measure the error rate first.</span></div>
+    </div>
+  </section>
+
+  <div class="callout next">
+    <span class="nx-pill">Next session</span>
+    <p>Each lever now has a number. Session 6 stacks the router, the GPU and the cache into one monthly bill for Kiln, shows the two cheapest-looking plans that fail the quality floor, and ends with the memo.</p>
+  </div>
+
+  <footer class="pagefoot">
+    <span>Session 5 of 6 · learn-llm-inference-with-phoebe · by Phoebe Fu &nbsp;·&nbsp; 📚 <a href="https://phoebefu6.github.io/learn-with-phoebe/">Learn with Phoebe ↗</a></span>
+    <span><a href="04-quantised-serving-and-kv-cache.html">← Prev: Quantised serving</a> &nbsp;·&nbsp; <a href="06-the-serving-bench.html">Next: The serving bench →</a></span>
+  </footer>
+
+</main>
+
+<script src="../assets/inf-sample.js?v=1"></script>
+<script src="../assets/inf-live.js?v=1"></script>
+<script src="../assets/inf-ui.js?v=3"></script>
+<script src="../assets/app.js?v=1"></script>
+</body>
+</html>

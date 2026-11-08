@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- social:start -->
+<meta name="description" content="Where the AI bill and the wait actually come from: routing, batching, quantised serving and caching, priced on one bench. Six sessions for builders who ship an LLM feature and now own its bill and its latency: prefill and decode, routing between a big and a small model, continuous batching, the KV cache and quantised weights, prompt and prefix caching, and a serving bench on 2,000 real prompts. Free, by Phoebe Fu.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Learn with Phoebe">
+<meta property="og:title" content="Learn LLM Inference and Model Serving with Phoebe">
+<meta property="og:description" content="Where the AI bill and the wait come from: routing, batching, quantised serving and caching, priced on one bench in your browser.">
+<meta property="og:url" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/">
+<meta property="og:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Learn LLM Inference and Model Serving with Phoebe">
+<meta name="twitter:description" content="Route 2,000 real prompts, size a GPU at a latency target, price the cache, and stack them into one monthly bill.">
+<meta name="twitter:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<!-- social:end -->
+<title>Learn LLM Inference and Model Serving with Phoebe</title>
+<link rel="stylesheet" href="assets/style.css?v=1">
+<style>
+
+  .stats-row { display: flex; gap: 2.4rem; margin-top: 1.5rem; flex-wrap: wrap; }
+  .stat b { display: block; font-size: 2.1rem; font-weight: 800; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: .72rem; opacity: 1; text-transform: uppercase; letter-spacing: .09em; font-weight: 600; }
+
+  .course-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; margin-top: 1.5rem; }
+  .course-card {
+    border: 1px solid var(--hairline);
+    border-top: 4px solid var(--diff, var(--indigo));
+    border-radius: var(--radius);
+    padding: 1.2rem 1.3rem 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+    text-decoration: none;
+    color: var(--ink);
+    background: #fff;
+    transition: box-shadow .15s ease, border-color .15s ease, transform .15s ease;
+    position: relative;
+  }
+  .course-card:hover { border-color: var(--indigo-soft); border-top-color: var(--diff, var(--indigo)); box-shadow: 0 8px 28px rgba(var(--shadow-rgb),.16); transform: translateY(-3px); }
+  .course-card .cicon { font-size: 1.7rem; line-height: 1; }
+  .course-card .cnum { font-size: .72rem; font-weight: 700; color: var(--indigo); text-transform: uppercase; letter-spacing: .1em; }
+  .course-card h3 { font-size: 1.05rem; font-weight: 800; line-height: 1.3; }
+  .course-card p { font-size: .85rem; color: var(--muted); flex: 1; }
+  .course-card .meta { display: flex; gap: .4rem; flex-wrap: wrap; }
+
+  .diff-legend { display: flex; gap: 1rem; margin-top: 1.6rem; font-size: .74rem; color: var(--muted); font-weight: 600; flex-wrap: wrap; }
+  .diff-legend i { display: inline-block; width: .85rem; height: .35rem; border-radius: 999px; margin-right: .35rem; vertical-align: middle; }
+
+  .paths { margin-top: 2.6rem; }
+  .paths h2 { font-size: 1.3rem; font-weight: 800; margin-bottom: .3rem; }
+  .paths .plede { color: var(--muted); font-size: .92rem; margin-bottom: .8rem; }
+  .path { display: flex; gap: .55rem; align-items: center; padding: .75rem 0; border-bottom: .5px solid var(--hairline); flex-wrap: wrap; }
+  .path:last-child { border-bottom: none; }
+  .path b { min-width: 15.5rem; font-size: .9rem; }
+  .path .pstep { background: var(--indigo-50); color: var(--indigo-deep); border-radius: 999px; padding: .16rem .68rem; font-weight: 700; font-size: .8rem; text-decoration: none; transition: all .12s ease; }
+  .path .pstep:hover { background: var(--indigo); color: #fff; }
+  .path .parr { color: var(--muted); font-weight: 700; }
+
+  .mm-section { margin-top: 1.6rem; }
+  .mm-section h2 { font-size: 1.3rem; font-weight: 800; margin-bottom: .2rem; }
+  .mm-section .mm-lede { color: var(--muted); font-size: .92rem; margin-bottom: .4rem; }
+  .mm-wrap { border: 1px solid var(--hairline); border-radius: var(--radius); background: linear-gradient(180deg,#fff,var(--indigo-50)); padding: .6rem; overflow-x: auto; }
+  .mm-svg { width: 100%; height: auto; display: block; max-width: 60rem; margin: 0 auto; min-width: 34rem; }
+  .mm-link { cursor: pointer; text-decoration: none; }
+  .mm-node rect { transition: opacity .15s ease, filter .15s ease; }
+  .mm-node text { pointer-events: none; }
+  .mm-link:hover .mm-node rect { filter: brightness(1.06); }
+  .mm-edge { transition: opacity .15s ease; }
+
+  .not-this { border: 1px solid var(--hairline); border-left: 4px solid var(--clay); border-radius: var(--radius); background: #fff; padding: 1.1rem 1.3rem; margin-top: 1.2rem; }
+  .not-this h3 { font-size: .95rem; font-weight: 800; margin-bottom: .5rem; }
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Learn with Phoebe · AI</div>
+    <h1>Learn <span class="accent">LLM Inference and Model Serving</span> with Phoebe</h1>
+    <p class="sub">Where the AI bill and the wait actually come from: routing, batching, quantised serving and caching, priced on one bench. Six sessions for builders who already ship an LLM feature and now own its bill and its latency. Why the first token and every later token cost what they do, which requests a smaller model can take, what one rented GPU really serves at a latency target, how the key-value cache and smaller weights change that, how prompt layout turns into a cache discount, and a serving bench on 2,000 real prompts that stacks it all into one monthly bill.</p>
+    <div class="stats-row">
+      <div class="stat"><b data-count="6">6</b><span>sessions</span></div>
+      <div class="stat"><b data-count="2000">2,000</b><span>real prompts on the bench</span></div>
+      <div class="stat"><b data-count="3">3</b><span>levers stacked</span></div>
+      <div class="stat"><b data-count="45">45</b><span>min per session</span></div>
+    </div>
+  </div>
+</header>
+<main class="wrap">
+  <section class="section">
+    <div class="paths" style="margin-top:0">
+      <h2>The six sessions 🧭 <span style="font-size:.85rem;font-weight:600;color:var(--muted)">· from a bill that tripled to a signed serving plan</span></h2>
+      <p class="plede">The running case is <strong>Kiln, a constructed B2B software company</strong>. Its in-app assistant launched well, and then in one quarter the model bill tripled and the slowest users waited twice as long for the first word. One large API model answers every request. Maya, its platform engineer, has to make it cheaper and faster without making it worse. Kiln and everyone in it are invented for teaching, and every page says so; the prompts on the bench are real.</p>
+    </div>
+    <div class="course-grid">
+      <a class="course-card" href="courses/01-where-the-money-goes.html" style="--diff:#34D399">
+        <span class="cicon">🔥</span>
+        <span class="cnum">Session 1 · foundations</span>
+        <h3>Where the money and the milliseconds go</h3>
+        <p>One request split into prefill and decode, time to first token against time per token, why output tokens cost more, and Kiln's real request mix split into two budgets.</p>
+        <span class="meta"><span class="pill amber">▶ Start here</span></span>
+      </a>
+      <a class="course-card" href="courses/02-routing.html" style="--diff:#FBBF24">
+        <span class="cicon">🔀</span>
+        <span class="cnum">Session 2 · core</span>
+        <h3>Routing: not every question needs the big model</h3>
+        <p>Fixed tiers, cascades and learned routers, the router's own errors as a cost, and 2,000 real prompts routed at three thresholds on a cost against quality frontier.</p>
+        <span class="meta"><span class="pill">three thresholds</span></span>
+      </a>
+      <a class="course-card" href="courses/03-batching.html" style="--diff:#FBBF24">
+        <span class="cicon">🚌</span>
+        <span class="cnum">Session 3 · core</span>
+        <h3>Batching and the GPU you rent</h3>
+        <p>Static against continuous batching, throughput against the tail of first-token latency, and the highest load one L4 serves at Kiln's 1 second target.</p>
+        <span class="meta"><span class="pill">find the max load</span></span>
+      </a>
+      <a class="course-card" href="courses/04-quantised-serving-and-kv-cache.html" style="--diff:#FB923C">
+        <span class="cicon">🧊</span>
+        <span class="cnum">Session 4 · deeper</span>
+        <h3>Quantised serving and the KV cache</h3>
+        <p>KV memory per token, paged attention and the concurrency ceiling, FP8, INT8 and INT4 weights and what the published evals say they cost in quality.</p>
+        <span class="meta"><span class="pill">fit it on one GPU</span></span>
+      </a>
+      <a class="course-card" href="courses/05-caching-as-a-cost-lever.html" style="--diff:#FB923C">
+        <span class="cicon">♻️</span>
+        <span class="cnum">Session 5 · deeper</span>
+        <h3>Caching as a cost lever</h3>
+        <p>Prompt layout for prefix hits, KV prefix reuse in vLLM and SGLang, the minimum-length trap, and an answer cache's hit rate against stale and wrong answers.</p>
+        <span class="meta"><span class="pill">re-lay out the prompt</span></span>
+      </a>
+      <a class="course-card" href="courses/06-the-serving-bench.html" style="--diff:#F87171">
+        <span class="cicon">🧮</span>
+        <span class="cnum">Session 6 · bench night</span>
+        <h3>The serving bench: Kiln's serving plan</h3>
+        <p>API against managed endpoint against your own GPU, router plus batching plus quantisation plus cache in one monthly bill, two plans that fail the floor, and the memo.</p>
+        <span class="meta"><span class="pill amber">★ the bench</span></span>
+      </a>
+    </div>
+    <div class="diff-legend">
+      <span><i style="background:#34D399"></i>foundations</span>
+      <span><i style="background:#FBBF24"></i>core</span>
+      <span><i style="background:#FB923C"></i>deeper</span>
+      <span><i style="background:#F87171"></i>bench night</span>
+    </div>
+  </section>
+  <section class="section">
+    <div class="paths" style="margin-top:0">
+      <h2>Your passport 🎫</h2>
+      <p class="plede">Clear all three quiz questions in a session and it gets stamped. Six stamps means you can split a request into prefill and decode, route between two models against a quality floor, size a GPU at a latency target, fit a model and its cache in memory, price a prompt cache, and write a serving plan with its flip conditions. Stamps live in this browser only.</p>
+    </div>
+    <div class="pp-strip"></div>
+  </section>
+  <section class="section">
+    <div class="not-this">
+      <h3>What this is not, so you land in the right place 🧭</h3>
+      <table class="clean">
+        <tr><th>If your question is</th><th>Go here instead</th></tr>
+        <tr><td>Should we fine-tune a small model, and at what volume does it break even?</td><td><a href="https://phoebefu6.github.io/learn-fine-tuning-slm-with-phoebe/">Learn Fine-tuning and Small Language Models ↗</a></td></tr>
+        <tr><td>How do I read cache tokens and cost per span on an invoice or a trace?</td><td><a href="https://phoebefu6.github.io/learn-ai-observability-with-phoebe/">Learn AI Observability ↗</a></td></tr>
+        <tr><td>Which latency and cost targets should gate a launch?</td><td><a href="https://phoebefu6.github.io/learn-agent-launch-with-phoebe/">Learn Agent Launch ↗</a></td></tr>
+        <tr><td>Where does the time go in a voice agent's turn?</td><td><a href="https://phoebefu6.github.io/learn-voice-multimodal-agents-with-phoebe/">Learn Voice and Multimodal Agents ↗</a></td></tr>
+        <tr><td><strong>The feature works, and I need it cheaper and faster without making it worse.</strong></td><td><strong>you are in the right place</strong></td></tr>
+      </table>
+      <p style="margin-top:.7rem;font-size:.86rem;color:var(--muted)"><strong>The mechanism and the money behind serving a model.</strong> Fine-tuning, cost accounting and launch governance are taught next door and linked from here rather than repeated.</p>
+    </div>
+  </section>
+  <section class="section">
+    <div class="paths">
+      <h2>Choose your path 🗺️</h2>
+      <p class="plede">Three doors into the same habit: price it at the latency you promise, against a quality floor.</p>
+      <div class="path"><b>💸 The bill is the problem</b>
+        <a class="pstep" href="courses/01-where-the-money-goes.html">1</a><span class="parr">→</span>
+        <a class="pstep" href="courses/02-routing.html">2</a><span class="parr">→</span>
+        <a class="pstep" href="courses/05-caching-as-a-cost-lever.html">5</a><span class="parr">→</span>
+        <a class="pstep" href="courses/06-the-serving-bench.html">6</a>
+        <span style="font-size:.82rem;color:var(--muted)">split it, route it, cache it, price it</span>
+      </div>
+      <div class="path"><b>⏱️ The wait is the problem</b>
+        <a class="pstep" href="courses/01-where-the-money-goes.html">1</a><span class="parr">→</span>
+        <a class="pstep" href="courses/03-batching.html">3</a><span class="parr">→</span>
+        <a class="pstep" href="courses/04-quantised-serving-and-kv-cache.html">4</a>
+        <span style="font-size:.82rem;color:var(--muted)">prefill and decode, the queue, the memory</span>
+      </div>
+      <div class="path"><b>🧭 The whole path</b>
+        <a class="pstep" href="courses/01-where-the-money-goes.html">1</a><span class="parr">→</span>
+        <a class="pstep" href="courses/02-routing.html">2</a><span class="parr">→</span>
+        <a class="pstep" href="courses/03-batching.html">3</a><span class="parr">→</span>
+        <a class="pstep" href="courses/04-quantised-serving-and-kv-cache.html">4</a><span class="parr">→</span>
+        <a class="pstep" href="courses/05-caching-as-a-cost-lever.html">5</a><span class="parr">→</span>
+        <a class="pstep" href="courses/06-the-serving-bench.html">6</a>
+        <span style="font-size:.82rem;color:var(--muted)">from the tripled bill to the signed plan</span>
+      </div>
+    </div>
+  </section>
+  <section class="section">
+    <div class="paths" style="margin-top:0">
+      <h2>What is honest here 🧾</h2>
+      <p class="plede">Serving travels with big multipliers, and each one is true on its own benchmark. Each claim on these pages carries its status.</p>
+    </div>
+    <table class="clean">
+      <tr><th>Claim</th><th>Status</th></tr>
+      <tr><td>Router quality, routing share and cost per 1,000 requests on the bench</td><td><strong>Really computed</strong> in your browser from 2,000 real prompts released with the RouteLLM paper (Apache-2.0), with a judge's score of the small model's real answer, and checked against an independent Python run</td></tr>
+      <tr><td>What a GPU serves at a first-token target</td><td><strong>Modelled</strong> from spec-sheet bandwidth and compute plus a seeded queue, labelled on every number, and optimistic against vLLM's own reported speed</td></tr>
+      <tr><td>API, cache and GPU-hour prices</td><td><strong>Vendor list prices</strong> read on 2026-11-08; they change often, so re-verify</td></tr>
+      <tr><td>"Routers cut cost by 2x, or 85%, or 98%"</td><td><strong>Each on its own benchmark</strong> (RouteLLM paper, its README, FrugalGPT); session 2 sets them beside a floor on real rows</td></tr>
+      <tr><td>"FP8 is lossless, INT4 loses quality"</td><td><strong>One large study</strong> (Kurtic et al.) finds FP8 effectively lossless and INT4 weight-only close to 8-bit on its evals; session 4 says test your own task</td></tr>
+      <tr><td>"Engine X is 2x to 36x faster"</td><td><strong>Each against its own baseline of the day</strong>; the multipliers do not stack</td></tr>
+      <tr><td>Kiln, its volume, system prompt, floor and target</td><td><strong>Constructed,</strong> for teaching</td></tr>
+    </table>
+  </section>
+  <section class="section mm-section">
+    <h2>The knowledge map 🧠</h2>
+    <p class="mm-lede">The whole path at a glance - hover a session to spotlight its concepts, click any node to jump in.</p>
+    <div class="mm-wrap"><div id="mindmap"></div></div>
+  </section>
+  <footer class="pagefoot">
+    <span>learn-llm-inference-with-phoebe · by Phoebe Fu &nbsp;·&nbsp; 📚 <a href="https://phoebefu6.github.io/learn-with-phoebe/">Learn with Phoebe ↗</a></span>
+    <span>Neighbours on the shelf: <a href="https://phoebefu6.github.io/learn-fine-tuning-slm-with-phoebe/">Fine-tuning ↗</a> &nbsp;·&nbsp; <a href="https://phoebefu6.github.io/learn-ai-observability-with-phoebe/">AI Observability ↗</a> &nbsp;·&nbsp; <a href="https://phoebefu6.github.io/learn-agent-launch-with-phoebe/">Agent Launch ↗</a></span>
+  </footer>
+</main>
+<script>
+window.MINDMAP_DATA = {
+ "title": "LLM inference\n+ serving",
+ "centerColor": "#7A1A04",
+ "sessions": [
+  {
+   "label": "Money and\nmilliseconds",
+   "href": "courses/01-where-the-money-goes.html",
+   "color": "#34D399",
+   "concepts": [
+    {
+     "label": "One request, two jobs",
+     "href": "courses/01-where-the-money-goes.html"
+    },
+    {
+     "label": "What each job waits on",
+     "href": "courses/01-where-the-money-goes.html"
+    },
+    {
+     "label": "Why output costs more",
+     "href": "courses/01-where-the-money-goes.html"
+    }
+   ]
+  },
+  {
+   "label": "Routing",
+   "href": "courses/02-routing.html",
+   "color": "#FBBF24",
+   "concepts": [
+    {
+     "label": "Tiers and cascades",
+     "href": "courses/02-routing.html"
+    },
+    {
+     "label": "Learned routers",
+     "href": "courses/02-routing.html"
+    },
+    {
+     "label": "Cost against quality",
+     "href": "courses/02-routing.html"
+    }
+   ]
+  },
+  {
+   "label": "Batching and\nthe GPU",
+   "href": "courses/03-batching.html",
+   "color": "#FBBF24",
+   "concepts": [
+    {
+     "label": "Static vs continuous",
+     "href": "courses/03-batching.html"
+    },
+    {
+     "label": "Throughput vs the tail",
+     "href": "courses/03-batching.html"
+    },
+    {
+     "label": "Max load at a target",
+     "href": "courses/03-batching.html"
+    }
+   ]
+  },
+  {
+   "label": "Quantised serving\n+ KV cache",
+   "href": "courses/04-quantised-serving-and-kv-cache.html",
+   "color": "#FB923C",
+   "concepts": [
+    {
+     "label": "KV bytes per token",
+     "href": "courses/04-quantised-serving-and-kv-cache.html"
+    },
+    {
+     "label": "Paged attention",
+     "href": "courses/04-quantised-serving-and-kv-cache.html"
+    },
+    {
+     "label": "FP8, INT8, INT4",
+     "href": "courses/04-quantised-serving-and-kv-cache.html"
+    }
+   ]
+  },
+  {
+   "label": "Caching as a\ncost lever",
+   "href": "courses/05-caching-as-a-cost-lever.html",
+   "color": "#FB923C",
+   "concepts": [
+    {
+     "label": "Static-first prompts",
+     "href": "courses/05-caching-as-a-cost-lever.html"
+    },
+    {
+     "label": "KV prefix reuse",
+     "href": "courses/05-caching-as-a-cost-lever.html"
+    },
+    {
+     "label": "Answer cache risk",
+     "href": "courses/05-caching-as-a-cost-lever.html"
+    }
+   ]
+  },
+  {
+   "label": "The serving\nbench",
+   "href": "courses/06-the-serving-bench.html",
+   "color": "#F87171",
+   "concepts": [
+    {
+     "label": "Three ways to pay",
+     "href": "courses/06-the-serving-bench.html"
+    },
+    {
+     "label": "Levers multiply",
+     "href": "courses/06-the-serving-bench.html"
+    },
+    {
+     "label": "Two plans that fail",
+     "href": "courses/06-the-serving-bench.html"
+    }
+   ]
+  }
+ ]
+};
+</script>
+<script src="assets/mindmap.js?v=1"></script>
+<script src="assets/app.js?v=1"></script>
+</body>
+</html>

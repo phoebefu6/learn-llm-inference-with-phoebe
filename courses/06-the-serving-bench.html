@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- social:start -->
+<meta name="description" content="Session 6 of 6. The serving bench: route 2,000 real prompts between a big and a small model, find what one GPU actually serves at a first-token target, price the prompt cache, then stack all three into Kiln's monthly bill against the all-big baseline. With the everything-small trap, the scrambled-router break button, API against managed endpoint against self-hosting, and Kiln's decision memo.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Learn with Phoebe">
+<meta property="og:title" content="The serving bench: Kiln's serving plan - learn llm inference with phoebe">
+<meta property="og:description" content="Session 6 of 6. Router, capacity and cache computed in your browser, stacked into one monthly bill and one memo.">
+<meta property="og:url" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/courses/06-the-serving-bench.html">
+<meta property="og:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The serving bench: Kiln's serving plan - learn llm inference with phoebe">
+<meta name="twitter:description" content="Session 6 of 6. Router, capacity and cache, stacked into one monthly bill, computed in your browser.">
+<meta name="twitter:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<!-- social:end -->
+<title>Session 6 · The serving bench: Kiln's serving plan - learn llm inference with phoebe</title>
+<link rel="stylesheet" href="../assets/style.css?v=1">
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="wrap">
+    <span class="crumb"><a href="../index.html">learn-llm-inference-with-phoebe</a> / Session 6 of 6</span>
+    <button class="btn" id="toggle-all" type="button">Expand all</button>
+    <button class="btn primary" id="zoom-toggle" type="button">Projector zoom: off</button>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Learn LLM Inference and Model Serving with Phoebe · Session 6 of 6</div>
+    <h1>The serving bench: Kiln's <span class="accent">serving plan</span></h1>
+    <p class="sub">Five sessions each pulled one lever: routing, batching, smaller weights, the key-value cache, the prompt cache. Tonight the bench pulls them together on the same 2,000 real prompts and turns them into one monthly bill. Which path should Kiln's easy requests take: a cheaper API model, a managed endpoint, or a GPU it runs itself? How much does each lever add once the others are on? And which two shortcuts look like the best plan on the chart and fail the quality floor? The answer goes into a one-page memo.</p>
+    <div class="chip-row">
+      <span class="chip level">🔴 Bench night</span>
+      <span class="chip audience">Builders and their budget owners</span>
+      <span class="chip audience">Runs in the browser</span>
+      <span class="chip time">45 min</span>
+    </div>
+    <div class="agenda">
+      <span class="a1" style="flex:1">0-3 · Welcome</span>
+      <span class="a2" style="flex:3">3-12 · Three ways to pay, the stack</span>
+      <span class="a3" style="flex:6">12-40 · The bench, then the memo</span>
+      <span class="a4" style="flex:1">40-45 · Q&amp;A</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="section" id="intro">
+    <div class="section-kicker">
+      <span class="klabel">Part 0</span>
+      <h2>Where we start</h2>
+    </div>
+    <p class="lede">Constructed Kiln example. Today every one of Kiln's 1,500,000 requests a month goes to one big API model, gpt-4.1 as the stand-in, and the bench prices that at $6,896 a month. Maya has three findings from the last five sessions and one evening to turn them into a plan Theo can sign. The rows are real: 2,000 held-out prompts from RouteLLM's released dataset (Apache-2.0), each with a big-model answer, a small-model answer and a judge's score of the small one. The GPU side is a labelled model. Kiln's volume, its 1,200-token system prompt, its 95 percent quality floor and its 1 second first-token target are constructed.</p>
+
+    <div class="legend">
+      <span class="pill">🎫 Clear all three quiz questions to stamp your passport</span>
+      <span class="pill">computed = counted from real rows in your browser</span>
+      <span class="pill">modelled = a stated rule, labelled on the widget</span>
+      <span class="pill">list price = read 2026-11-08, re-verify</span>
+    </div>
+
+    <div class="callout win">
+      <p><strong>★ What you walk out with tonight.</strong> A way to compare an API, a managed endpoint and your own GPU on the same unit (cost per 1,000 requests at a latency target), the order in which Kiln's levers pay, the two plans that look cheapest and fail, and a six-line decision memo whose every number came out of the bench.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-1">
+    <div class="section-kicker">
+      <span class="klabel">Part 1 · covers API, managed endpoint and self-hosting</span>
+      <h2>Three ways to pay for a token</h2>
+      <span class="tag concept">4 min live</span>
+    </div>
+    <p class="lede">An API bills per token, so cost rises in a straight line with traffic and an idle hour costs nothing. A managed endpoint, such as Hugging Face Inference Endpoints, bills per GPU-hour whether the GPU is busy or not. Running the engine yourself on a rented GPU bills the same way, plus the people who keep it up. The fine-tuning course drew the sloped line against the flat one; this bench asks what the flat line actually serves.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cost per 1,000 Kiln requests on four paths. Everything on gpt-4.1: 4.60 dollars. Everything on gpt-4.1-mini: 0.98 dollars. Llama 3.1 8B on one L4 with FP8 weights and a prefix cache, running at its maximum load that meets the 1 second first-token target: 0.15 dollars. Llama 3.1 8B on one H100 at its maximum load: 0.10 dollars. The two GPU numbers only hold when the GPU is full.">
+        <defs>
+          <filter id="p6aSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="61" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p6aHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+        </defs>
+        <style>
+          .p6aH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p6aL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p6aS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p6aV { font: 800 13px Inter, sans-serif; fill: #7A1A04; }
+          .p6aN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p6aH" x="30" y="26">COST PER 1,000 KILN REQUESTS, FOUR PATHS</text>
+
+        <g filter="url(#p6aSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="260" y="56" width="480" height="30" rx="5" fill="#B82500"/>
+          <rect x="260" y="108" width="102" height="30" rx="5" fill="url(#p6aHc)"/>
+          <rect x="260" y="160" width="16" height="30" rx="4" fill="#FFF1E0" stroke="#145868"/>
+          <rect x="260" y="212" width="11" height="30" rx="4" fill="#FFF1E0" stroke="#145868"/>
+        </g>
+
+        <text class="p6aL" x="240" y="70" text-anchor="end">API: gpt-4.1, everything</text>
+        <text class="p6aS" x="240" y="84" text-anchor="end">per token, $2.00 / $8.00</text>
+        <text class="p6aV" x="752" y="76">$4.60</text>
+        <text class="p6aL" x="240" y="122" text-anchor="end">API: gpt-4.1-mini</text>
+        <text class="p6aS" x="240" y="136" text-anchor="end">per token, $0.40 / $1.60</text>
+        <text class="p6aV" x="374" y="128">$0.98</text>
+        <text class="p6aL" x="240" y="174" text-anchor="end">own L4, FP8, prefix cache</text>
+        <text class="p6aS" x="240" y="188" text-anchor="end">$0.80/h, full at 1.5 req/s</text>
+        <text class="p6aV" x="288" y="180">$0.15</text>
+        <text class="p6aL" x="240" y="226" text-anchor="end">own H100, BF16</text>
+        <text class="p6aS" x="240" y="240" text-anchor="end">$4.50/h, full at 12 req/s</text>
+        <text class="p6aV" x="283" y="232">$0.10</text>
+
+        <text class="p6aN" x="30" y="282">GPU rows: the capacity model at its highest load meeting a 1 s p95 first-token target. An idle GPU still costs</text>
+        <text class="p6aN" x="30" y="300">its hourly price: an L4 is $584 a month, an H100 $3,285. Prices read 2026-11-08, re-verify.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - a GPU is the cheapest token only when it is full; the bill is the hourly price, busy or idle</figcaption>
+    </figure>
+
+    <details class="card" open>
+      <summary><span class="mode live">Live</span>The unit that makes them comparable<span class="mini">2 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Price per million tokens and price per GPU-hour cannot be compared until you know how many requests the GPU serves per hour at the latency your users will accept. That is what sessions 3 and 4 built: the capacity widget finds the highest load at which the slowest five percent of first tokens still arrive within 1 second. Divide the hourly price by the requests served in that hour and you have cost per 1,000 requests, the same unit as the API rows.</p>
+        <p>The catch is in the figure's last line. The GPU's $0.15 holds only when the GPU runs at 1.5 requests a second all month. Kiln's easy traffic peaks at 1.02 requests a second (the plan widget prints it), so most of the month the L4 is part-idle and its real cost is the flat $584. The plan widget below prices that honestly: it counts whole GPUs, sized for the peak.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Which engine, if you run it yourself<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Read on 2026-11-08: vLLM (Apache-2.0) describes itself as "a high-throughput and memory-efficient inference and serving engine for LLMs", with PagedAttention, automatic prefix caching and chunked prefill on by default in its V1 engine. SGLang lists "RadixAttention, prefix caching, and multi-GPU parallelism". NVIDIA's TensorRT-LLM lists in-flight batching and a "Paged KV cache with intelligent block reuse". Hugging Face's own docs now say "text-generation-inference is now in maintenance mode" and point to vLLM and SGLang. A managed endpoint runs one of these for you; self-hosting means you pick, upgrade and page someone at night. Re-verify every engine's changelog before you commit.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Two prices for the same GPU on one vendor's site.</strong> Hugging Face's pricing page, read on 2026-11-08, lists an H100 80GB endpoint on AWS at $4.50 an hour; its Inference Endpoints documentation lists H100 on GCP only, at $10 an hour. The bench uses $4.50 and says where it came from. A serving plan that hangs on one hourly price should quote the page, the date and the region, because the cheaper reading may not be the one you can buy.</p>
+    </div>
+  </section>
+
+  <section class="section" id="bench">
+    <div class="section-kicker">
+      <span class="klabel">The bench</span>
+      <h2>Three levers, each computed on its own</h2>
+      <span class="tag concept">8 min live</span>
+    </div>
+    <p class="lede">Each widget is one part of the bench, with every number computed in your browser by the same engine an independent Python script reproduces: 2,452 values, all equal. Run each one at Kiln's settings before stacking them.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Kiln's serving plan as a pipeline. Every request first meets the router. Requests the router scores as easy go to a small model, Llama 3.1 8B in FP8 on Kiln's own L4 with continuous batching and a prefix cache. The rest go to the big API model with a static-first prompt so the provider's prompt cache hits. Both paths return an answer. The router's threshold decides the share on each side and the quality.">
+        <defs>
+          <filter id="p6bSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="67" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <marker id="p6bAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p6bH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p6bL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p6bS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p6bB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p6bN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p6bH" x="30" y="26">KILN'S PLAN: ONE ROUTER, TWO PATHS, A CACHE ON EACH</text>
+
+        <g filter="url(#p6bSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="30" y="126" width="120" height="56" rx="10" transform="rotate(-1 90 154)" fill="#FFFFFF"/>
+          <path d="M156 154 L206 154" marker-end="url(#p6bAr)"/>
+          <path d="M216 154 L262 110 L308 154 L262 198 Z" fill="#FFB48C"/>
+          <path d="M300 136 L384 92" marker-end="url(#p6bAr)"/>
+          <path d="M300 172 L384 214" marker-end="url(#p6bAr)"/>
+          <rect x="394" y="54" width="290" height="78" rx="10" transform="rotate(0.5 539 93)" fill="#FDEFE8"/>
+          <rect x="394" y="178" width="290" height="78" rx="10" transform="rotate(-0.5 539 217)" fill="#FFF1E0" stroke="#145868"/>
+          <path d="M690 93 L744 140" marker-end="url(#p6bAr)"/>
+          <path d="M690 217 L744 170" marker-end="url(#p6bAr)"/>
+          <rect x="752" y="128" width="100" height="52" rx="10" transform="rotate(1 802 154)" fill="#FFFFFF"/>
+        </g>
+
+        <text class="p6bL" x="90" y="152" text-anchor="middle">request</text>
+        <text class="p6bS" x="90" y="168" text-anchor="middle">1,300 tokens in</text>
+        <text class="p6bL" x="262" y="158" text-anchor="middle">router</text>
+        <text class="p6bS" x="262" y="226" text-anchor="middle">threshold 0.87</text>
+        <text class="p6bL" x="408" y="80">easy: own L4, Llama 3.1 8B FP8</text>
+        <text class="p6bS" x="408" y="98">continuous batching, paged KV</text>
+        <text class="p6bS" x="408" y="114">prefix cache on the system prompt</text>
+        <text class="p6bB" x="408" y="204">hard: big API model, gpt-4.1</text>
+        <text class="p6bS" x="408" y="222">static-first prompt layout</text>
+        <text class="p6bS" x="408" y="238">provider prompt cache, 90% hits</text>
+        <text class="p6bL" x="802" y="158" text-anchor="middle">answer</text>
+
+        <text class="p6bN" x="30" y="290">Part A sets the split and the quality, Part B the small side's GPUs, Part C the big side's input price.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - three levers in one pipeline: the router decides who goes where, each path has its own cache</figcaption>
+    </figure>
+
+    <h3>Part A · the router</h3>
+    <p>Learned router, threshold 0.87, gpt-4.1 prices: the widget should print 59.0% sent small, 95.7% acceptable, $2.49 per 1,000 requests and a 45.9% saving. Then tick the break button and watch the same threshold fall to 92.7% acceptable.</p>
+    <div class="inf-widget" data-part="router" data-policy="learned" data-t="870"></div>
+
+    <h3>Part B · capacity</h3>
+    <p>L4, Llama 3.1 8B, FP8 weights, BF16 KV cache, continuous batching, paged KV, prefix cache on. Run the sweep: the highest load meeting the 1 s target is 1.5 requests a second, $0.15 per 1,000 requests at that load. Turn the prefix cache off and the same GPU manages 0.75.</p>
+    <div class="inf-widget" data-part="capacity" data-w="fp8" data-lam="1.5" data-prefix="1"></div>
+
+    <h3>Part C · the cache</h3>
+    <p>Pick gpt-4.1, static first, 90% hits: $2.98 per 1,000 against $4.60 with no caching, 35.2% saved. Learn AI Observability does the accounting of cache tokens on an invoice (<a href="https://phoebefu6.github.io/learn-ai-observability-with-phoebe/courses/a4-what-ai-costs-you.html">what AI costs you ↗</a>); this part is the design decision behind it.</p>
+    <div class="inf-widget" data-part="cache"></div>
+  </section>
+
+  <section class="section" id="part-2">
+    <div class="section-kicker">
+      <span class="klabel">Part 2 · covers stacking the levers</span>
+      <h2>Levers do not add up, they multiply down</h2>
+      <span class="tag concept">4 min live</span>
+    </div>
+    <p class="lede">Each lever works on what the previous one left. The cache only discounts the requests that still go to the big model; the router decides how many those are; the GPU only has to carry what the router sends it. So the order you add them changes how much each one appears to save, and the total is not the sum of their solo savings.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Kiln's monthly bill under five plans, at 1,500,000 requests a month. Today, everything on gpt-4.1: 6,896 dollars. Cache only: 4,466 dollars. Router plus gpt-4.1-mini for the easy side: 3,732 dollars. Router plus one own L4: 3,434 dollars. Full stack, router plus L4 plus prompt cache: 2,436 dollars, 64.7 percent under today, at 95.7 percent acceptable answers.">
+        <defs>
+          <filter id="p6cSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="71" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p6cHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+        </defs>
+        <style>
+          .p6cH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p6cL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p6cS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p6cV { font: 800 13px Inter, sans-serif; fill: #7A1A04; }
+          .p6cN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p6cH" x="30" y="26">KILN'S MONTHLY BILL, 1,500,000 REQUESTS, ALL PLANS CLEAR THE 95% FLOOR</text>
+
+        <g filter="url(#p6cSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="250" y="52" width="480" height="30" rx="5" fill="#B82500"/>
+          <rect x="250" y="102" width="311" height="30" rx="5" fill="#B82500"/>
+          <rect x="250" y="152" width="198" height="30" rx="5" fill="#B82500"/>
+          <rect x="448" y="152" width="61" height="30" rx="5" fill="url(#p6cHc)"/>
+          <rect x="250" y="202" width="198" height="30" rx="5" fill="#B82500"/>
+          <rect x="448" y="202" width="41" height="30" rx="5" fill="#FFF1E0" stroke="#145868"/>
+          <rect x="250" y="252" width="129" height="30" rx="5" fill="#B82500"/>
+          <rect x="379" y="252" width="41" height="30" rx="5" fill="#FFF1E0" stroke="#145868"/>
+        </g>
+
+        <text class="p6cL" x="236" y="72" text-anchor="end">today: everything big</text>
+        <text class="p6cV" x="742" y="72">$6,896</text>
+        <text class="p6cL" x="236" y="122" text-anchor="end">cache only</text>
+        <text class="p6cV" x="573" y="122">$4,466</text>
+        <text class="p6cL" x="236" y="172" text-anchor="end">router + gpt-4.1-mini</text>
+        <text class="p6cV" x="521" y="172">$3,732</text>
+        <text class="p6cL" x="236" y="222" text-anchor="end">router + own L4</text>
+        <text class="p6cV" x="501" y="222">$3,434</text>
+        <text class="p6cL" x="236" y="272" text-anchor="end">full stack</text>
+        <text class="p6cV" x="432" y="272">$2,436</text>
+        <text class="p6cS" x="500" y="272">64.7% under today</text>
+
+        <text class="p6cN" x="30" y="316">Solid: the big model's API bill. Hatched: gpt-4.1-mini. Outlined: one L4 ($584). Computed; GPU count modelled.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the cache and the router each cut about a third to a half alone; together, with the GPU, they cut almost two thirds</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Read the plan widget's five presets in order<span class="mini">2 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Cache only saves 35.2 percent: every request stays on gpt-4.1 and its 1,200-token system prompt is billed at the cached price on 90 percent of requests. The router with gpt-4.1-mini on the easy side saves 45.9 percent. Moving the easy side from gpt-4.1-mini ($882 a month) to one L4 ($584) takes the saving to 50.2 percent, not because the GPU is cheaper per token at Kiln's volume but because one GPU covers the easy side's peak. Adding the cache to the big side gives the full stack: $2,436, 64.7 percent under today, at 95.7 percent acceptable answers.</p>
+        <p>Note what the cache saves inside the full stack: $2,850 of big-side spend becomes $1,852, about $1,000 a month. Alone it saved $2,430. The router took most of the traffic it would have discounted.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Where the bigger GPU loses<span class="mini">2 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Choose "Full stack on an H100" in the plan widget. The H100 serves 12 requests a second at the target, eight times the L4, and at full load its $0.10 per 1,000 beats the L4's $0.15. Kiln's easy side does not fill it, so the bill is the flat $3,285 a month and the plan lands at $5,137, only 25.5 percent under today. Capacity you cannot fill is the most expensive capacity there is. The L4's limit is the right one to hit first; the H100 is the plan for when the easy side outgrows several L4s.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Published routing savings are each their own bench.</strong> RouteLLM (Ong et al. 2024) reports routers that "reduce costs by over 2 times without sacrificing response quality", with a cost-saving ratio of 3.66x on MT Bench at half the quality gap recovered but 1.41x on MMLU. FrugalGPT (Chen et al. 2023) reports matching GPT-4 "with up to 98% cost reduction" on its tasks. Kiln's cheap router saves 45.9 percent at a 95 percent floor on 2,000 RouteLLM rows. None of these is wrong; each is a different task mix, quality bar and pair of models. Your own floor on your own rows is the only number that belongs in your memo.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-3">
+    <div class="section-kicker">
+      <span class="klabel">Part 3 · covers the anti-lever and the break button</span>
+      <h2>Two plans that look cheapest and fail</h2>
+      <span class="tag concept">3 min live</span>
+    </div>
+    <p class="lede">A cost chart rewards whatever spends least, so the two traps sit at the bottom of it. One sends everything to the small model. The other keeps the router but with its scores scrambled, which still splits the traffic in the same proportion and so still looks like routing. Both are cheaper than the full stack. Both fail the floor.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two panels. Left, the traps: everything small on two own L4s costs 1,168 dollars a month but only 87.1 percent of answers are acceptable; the full stack with a scrambled router costs 2,391 dollars at 92.7 percent. Both fail the 95 percent floor. Right, the plan that holds: the full stack with the real router costs 2,436 dollars at 95.7 percent and clears the floor.">
+        <defs>
+          <filter id="p6dSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="73" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+        </defs>
+        <style>
+          .p6dH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p6dL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p6dS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p6dR { font: 800 12px Inter, sans-serif; fill: #991B1B; }
+          .p6dG { font: 800 12px Inter, sans-serif; fill: #7A1A04; }
+          .p6dN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p6dH" x="30" y="26">CHEAPER ON THE CHART, UNDER THE FLOOR IN THE PRODUCT</text>
+
+        <g filter="url(#p6dSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="50" width="390" height="190" rx="12" transform="rotate(-0.4 235 145)" fill="#FEF2F2" stroke="#FCA5A5"/>
+          <rect x="450" y="50" width="390" height="190" rx="12" transform="rotate(0.4 645 145)" fill="#FDEFE8" stroke="#B82500"/>
+        </g>
+
+        <text class="p6dR" x="58" y="82">✗ The traps</text>
+        <text class="p6dL" x="58" y="112">Everything small, two own L4s</text>
+        <text class="p6dS" x="58" y="130">$1,168 a month, 87.1% acceptable</text>
+        <text class="p6dS" x="58" y="146">259 weak answers per 2,000 shipped</text>
+        <text class="p6dL" x="58" y="180">Full stack, scrambled router</text>
+        <text class="p6dS" x="58" y="198">$2,391 a month, 92.7% acceptable</text>
+        <text class="p6dS" x="58" y="214">same split, the wrong requests</text>
+
+        <text class="p6dG" x="468" y="82">✓ The plan that holds</text>
+        <text class="p6dL" x="468" y="112">Full stack, real router at 0.87</text>
+        <text class="p6dS" x="468" y="130">$2,436 a month, 95.7% acceptable</text>
+        <text class="p6dS" x="468" y="146">87 weak answers per 2,000 shipped</text>
+        <text class="p6dS" x="468" y="180">$45 a month more than the scrambled</text>
+        <text class="p6dS" x="468" y="196">router buys 3 points of quality</text>
+
+        <text class="p6dN" x="30" y="272">Floor: 95% acceptable, judged on the same 2,000 real rows. Computed in the plan widget; GPU count modelled.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the router's value is not the split, it is which requests it splits</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Why the break button matters<span class="mini">2 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>The scrambled router sends exactly the same share of traffic to the small model as the real one, 59.0 percent at threshold 0.87, because it uses the same scores, just attached to the wrong rows. So the bill barely moves and the quality falls from 95.7 to 92.7 percent. That proves the router carries a real signal: without it, the same split costs quality. A bench that cannot show this cannot tell a working router from a coin. It also says how weak the cheap router is: its area under the curve on the 2,000 rows is 0.662, where 0.5 is a coin. The cheapest threshold that clears the floor with a scrambled router is 0.91, saving only 26.7 percent.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>The ceiling nobody can buy<span class="mini">2 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>In the router widget, "Hindsight" routes on the judge's score itself: small exactly when the small model's answer scored 4 or 5. It sends 87.1 percent small, ships no weak answers and costs $1.44 per 1,000, a 68.7 percent saving. No router sees the judge's score before answering, so this is the ceiling, not a plan. The gap between the cheap router's 45.9 percent and the ceiling's 68.7 percent is what a better router could earn, and it is the honest budget for building one.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="demo-1">
+    <div class="section-kicker">
+      <span class="klabel">Capstone</span>
+      <h2>Kiln's decision memo</h2>
+      <span class="tag demo">★ 22 min · everyone builds</span>
+    </div>
+    <p class="lede">Constructed Kiln example. Maya's memo is one page with six lines, written for Theo and whoever signs the bill, and every number in it is one the bench printed. Run the plan widget through its presets first, then write the memo for your own product as you go.</p>
+
+    <div class="inf-widget" data-part="plan" data-plan="full"></div>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 270" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The memo drawn as a page with six lines: the decision, the quality result against the floor, the monthly bill and saving, the conditions that would flip the plan, the self-hosting risk, and the review date. The flip-conditions line is highlighted. An arrow leads from the bench into the memo, and from the memo to the budget owner.">
+        <defs>
+          <filter id="p6eSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="79" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <marker id="p6eAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p6eH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p6eL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p6eS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p6eB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p6eN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p6eH" x="30" y="26">ONE PAGE, SIX LINES, EVERY NUMBER FROM THE BENCH</text>
+
+        <g filter="url(#p6eSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="96" width="130" height="70" rx="8" transform="rotate(-1.2 105 131)" fill="#FDEFE8"/>
+          <path d="M176 131 L262 131" marker-end="url(#p6eAr)"/>
+          <rect x="280" y="44" width="330" height="180" rx="8" transform="rotate(-0.5 445 134)" fill="#FFFFFF"/>
+          <path d="M296 76 L594 76 M296 102 L594 102 M296 128 L594 128 M296 154 L594 154 M296 180 L594 180 M296 206 L594 206" stroke="#E2C3B7" stroke-width="1.2"/>
+          <rect x="292" y="136" width="306" height="22" rx="4" fill="#FFF1E0" stroke="#145868"/>
+          <path d="M626 131 L708 131" marker-end="url(#p6eAr)"/>
+          <circle cx="770" cy="104" r="15" fill="#FFFFFF"/>
+          <path d="M770 119 L770 158 M770 132 L752 146 M770 132 L788 146 M770 158 L758 182 M770 158 L782 182"/>
+        </g>
+
+        <text class="p6eL" x="105" y="128" text-anchor="middle">the bench</text>
+        <text class="p6eS" x="105" y="146" text-anchor="middle">your run</text>
+        <text class="p6eS" x="300" y="72">1 · the decision, in one line</text>
+        <text class="p6eS" x="300" y="98">2 · quality against the floor</text>
+        <text class="p6eS" x="300" y="124">3 · monthly bill and saving</text>
+        <text class="p6eB" x="300" y="150">4 · the numbers that would flip it</text>
+        <text class="p6eS" x="300" y="176">5 · what self-hosting adds</text>
+        <text class="p6eS" x="300" y="202">6 · review date and owner</text>
+        <text class="p6eL" x="770" y="206" text-anchor="middle">budget owner</text>
+
+        <text class="p6eN" x="30" y="250">Line 4 is the one a reader remembers: it names the number that would change the answer.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - a memo that names its own flip conditions is one a budget owner can hold you to, and trust</figcaption>
+    </figure>
+
+    <div class="steps">
+      <div class="step">
+        <p><strong>Write the decision as one line someone could disagree with.</strong> Staged, with a date, and with the cheapest safe step first.</p>
+        <div class="prompt-box good"><span class="label">★ Line 1 · decision</span>Stage 1 now: re-lay out the prompt static-first (cache only).
+Stage 2 next month: router at 0.87, easy side on one own L4,
+FP8 weights, prefix cache. Re-run the bench before stage 2.</div>
+      </div>
+      <div class="step">
+        <p><strong>Report quality against the floor, with the router's own error.</strong> Copy what the router widget printed.</p>
+        <div class="prompt-box good"><span class="label">★ Line 2 · quality</span>On 2,000 held-out real prompts: 95.7% acceptable at threshold
+0.87 (floor 95%). 59.0% go small; 87 weak answers per 2,000
+reach users. Scrambled router at the same split: 92.7%.</div>
+      </div>
+      <div class="step">
+        <p><strong>Give the bill at Kiln's volume, with the prices dated and the model labelled.</strong></p>
+        <div class="prompt-box good"><span class="label">★ Line 3 · cost</span>At 1,500,000 requests a month: today $6,896. Stage 1 $4,466
+(35.2% saved). Stage 2 $2,436 (64.7% saved): $1,852 API,
+$584 for one L4. List prices read 2026-11-08. GPU capacity is
+a model (1.5 req/s at a 1 s p95 first-token target).</div>
+      </div>
+      <div class="step">
+        <p><strong>Name what would flip the plan, in both directions.</strong> This is the line that makes the memo honest.</p>
+        <div class="prompt-box good"><span class="label">★ Line 4 · flip conditions</span>Harder NO to self-hosting if: a load test on the real L4 serves
+under 1.02 req/s, the easy side's peak, at the target (gpt-4.1-mini,
+$3,732 a month, is the stage-2 plan). Do not drop the router to
+save money: everything small fails the floor at 87.1%.</div>
+      </div>
+      <div class="step">
+        <p><strong>State what self-hosting adds that the bench does not price, and the review.</strong></p>
+        <div class="prompt-box good"><span class="label">★ Lines 5 and 6 · risk and review</span>Not in the numbers: on-call, upgrades, a second L4 for failover.
+If those cost more than $298 a month, gpt-4.1-mini wins stage 2.
+Review: after 30 days of stage 1, owner Maya, with Theo.</div>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <p><strong>The arithmetic in line 5.</strong> Router plus gpt-4.1-mini is $3,732 a month; router plus one own L4 is $3,434. The difference, $298, is the most the people and spare hardware for self-hosting can cost before the API path is cheaper. Write that number down for your own plan: it is usually the deciding one, and no price list shows it.</p>
+    </div>
+  </section>
+
+  <section class="section" id="exercise">
+    <div class="section-kicker">
+      <span class="klabel">Homework</span>
+      <h2>After tonight</h2>
+      <span class="tag exercise">45 min</span>
+    </div>
+    <ol>
+      <li><strong>Finish your six lines</strong> for your own product, with your own floor and your own volume. Every number must be one you can point to in a run.</li>
+      <li><strong>Label 200 of your own requests</strong> as "a small model's answer would be fine" or not, and measure any router you are considering against that set before you trust a published saving.</li>
+      <li><strong>Load-test one GPU</strong> with your real prompt and answer lengths before you believe any capacity number, including this bench's. Compare its p95 time to first token with the model's.</li>
+      <li><strong>Find your self-hosting break-even</strong>: the monthly people and failover cost at which your API path wins, as in line 5.</li>
+    </ol>
+  </section>
+
+  <section class="section" id="quiz">
+    <div class="section-kicker">
+      <span class="klabel">Check yourself</span>
+      <h2>Three questions</h2>
+    </div>
+    <p>Clear all three and session 6 gets stamped in your passport.</p>
+
+    <div class="quiz-q" data-answer="3">
+      <p class="qtext">1 · The everything-small plan costs $1,168 a month against the full stack's $2,436. Why does the memo reject it?</p>
+      <button class="qopt" type="button">A · Self-hosting two GPUs is always riskier than one</button>
+      <button class="qopt" type="button">B · It saves too little to be worth the change</button>
+      <button class="qopt" type="button">C · The small model is slower than the big one</button>
+      <button class="qopt" type="button">D · Only 87.1% of its answers are acceptable, under the 95% floor</button>
+      <p class="qwhy">The floor comes before the price. On the same 2,000 real rows, the small model's answer scored 4 or 5 for 87.1% of prompts, so sending everything small ships 259 weak answers per 2,000.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="0">
+      <p class="qtext">2 · Scrambling the router's scores keeps the bill almost the same. What does the drop from 95.7% to 92.7% acceptable prove?</p>
+      <button class="qopt" type="button">A · The router's scores carry real information about which requests the small model can handle</button>
+      <button class="qopt" type="button">B · The router is broken and should be removed</button>
+      <button class="qopt" type="button">C · Any split of 59% small would reach 95.7%</button>
+      <button class="qopt" type="button">D · The judge's scores are unreliable</button>
+      <p class="qwhy">The scrambled router sends the same 59.0% small, just the wrong 59.0%. The quality gap at the same split is the router's signal; a bench that could not show it could not tell a router from a coin.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="2">
+      <p class="qtext">3 · An H100 serves Kiln's easy side at $0.10 per 1,000 requests at full load, the L4 at $0.15. Why does the full stack on an H100 cost more?</p>
+      <button class="qopt" type="button">A · The H100 cannot run FP8 weights</button>
+      <button class="qopt" type="button">B · The H100 misses the 1 s first-token target</button>
+      <button class="qopt" type="button">C · Kiln's easy traffic does not fill it, so the bill is the flat $3,285 a month against the L4's $584</button>
+      <button class="qopt" type="button">D · The router sends more traffic to the H100</button>
+      <p class="qwhy">Per-request cost at full load only matters if you can fill the GPU. At Kiln's volume one L4 carries the easy side's peak, so the full stack costs $2,436 on the L4 and $5,137 on the H100.</p>
+    </div>
+
+    <p class="quiz-score"></p>
+  </section>
+
+  <section class="section" id="official">
+    <div class="section-kicker">
+      <span class="klabel">Sources covered</span>
+      <h2>What this session teaches, and where it came from</h2>
+    </div>
+    <div class="covered">
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">RouteLLM released data, routellm/gpt4_dataset (Apache-2.0)</span><span class="note">2,000 held-out prompts with GPT-4 and Mixtral 8x7B answers and a GPT-4 judge score; router, quality and cost computed in the browser and matched by an independent Python run, 2,452 values equal</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">RouterBench (Hu et al. 2024)</span><span class="note">Paper read at source. Its data carries no stated licence on Hugging Face (code is MIT), so its rows are not redistributed here</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">RouteLLM (Ong et al. 2024); FrugalGPT (Chen et al. 2023)</span><span class="note">Published routing and cascade savings, each on its own benchmark; read at source</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">OpenAI, Anthropic and Hugging Face price pages</span><span class="note">gpt-4.1 and gpt-4.1-mini, cached input, cache multipliers, GPU-hour prices and the two H100 listings; read 2026-11-08, re-verify</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">vLLM, SGLang, TensorRT-LLM and TGI docs</span><span class="note">Engine features as each project states them, and TGI's maintenance-mode notice; read 2026-11-08</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">The capacity model</span><span class="note">Roofline plus a seeded queue; optimistic against vLLM's reported 13 ms per token; labelled modelled on every number</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">Kiln, its volume, floor, target and system prompt</span><span class="note">Constructed for teaching; people and on-call cost of self-hosting not priced</span></div>
+    </div>
+    <p class="mono" style="margin-top:14px">Every fact on this page, and its verification tier, is recorded in the course's source map.</p>
+  </section>
+
+  <section class="cheat" id="cheatsheet">
+    <h3>Session 6 cheat sheet <span>· pin this</span></h3>
+    <div class="grid-2">
+      <div class="cheat-item"><b>One unit</b><span>Cost per 1,000 requests at your latency target. Then API, endpoint and GPU compare.</span></div>
+      <div class="cheat-item"><b>Full or flat</b><span>A GPU is cheap per request only when full. Otherwise the bill is the hourly price.</span></div>
+      <div class="cheat-item"><b>Levers multiply</b><span>Each one works on what the last one left. Never add solo savings.</span></div>
+      <div class="cheat-item"><b>Floor first</b><span>Reject any plan under the quality floor, however cheap. Everything small fails.</span></div>
+      <div class="cheat-item"><b>Break your router</b><span>Scramble its scores. If quality does not fall at the same split, it is not routing.</span></div>
+      <div class="cheat-item"><b>Price the people</b><span>The API path's lead over self-hosting is the budget for on-call and failover.</span></div>
+    </div>
+  </section>
+
+  <div class="callout next">
+    <span class="nx-pill">Next step</span>
+    <p>Re-run the bench on your own rows: a week of your prompts, your own small model's answers, your own judge or labels, and a load test on the GPU you would rent. The shape will hold; the numbers will be yours.</p>
+  </div>
+
+  <footer class="pagefoot">
+    <span>Session 6 of 6 · learn-llm-inference-with-phoebe · by Phoebe Fu &nbsp;·&nbsp; 📚 <a href="https://phoebefu6.github.io/learn-with-phoebe/">Learn with Phoebe ↗</a></span>
+    <span><a href="05-caching-as-a-cost-lever.html">← Prev: Caching as a cost lever</a> &nbsp;·&nbsp; <a href="../index.html">Course home</a></span>
+  </footer>
+
+</main>
+
+<script src="../assets/inf-sample.js?v=1"></script>
+<script src="../assets/inf-live.js?v=1"></script>
+<script src="../assets/inf-ui.js?v=3"></script>
+<script src="../assets/app.js?v=1"></script>
+</body>
+</html>

@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- social:start -->
+<meta name="description" content="Session 2 of 6. Not every request needs the big model. Fixed tiers, cascades (FrugalGPT) and learned routers (RouteLLM), the router's two error types as costs, and the cost against quality frontier read off 2,000 real prompts. Build-along: route Kiln's traffic at three thresholds and find the cheapest one that clears a 95% quality floor.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Learn with Phoebe">
+<meta property="og:title" content="Routing: not every question needs the big model - learn llm inference with phoebe">
+<meta property="og:description" content="Session 2 of 6. Tiers, cascades and learned routers, the frontier, the floor, and a break button that proves the router carries a signal.">
+<meta property="og:url" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/courses/02-routing.html">
+<meta property="og:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Routing: not every question needs the big model - learn llm inference with phoebe">
+<meta name="twitter:description" content="Session 2 of 6. Route 2,000 real prompts between a big and a small model at three thresholds, in your browser.">
+<meta name="twitter:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<!-- social:end -->
+<title>Session 2 · Routing: not every question needs the big model - learn llm inference with phoebe</title>
+<link rel="stylesheet" href="../assets/style.css?v=1">
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="wrap">
+    <span class="crumb"><a href="../index.html">learn-llm-inference-with-phoebe</a> / Session 2 of 6</span>
+    <button class="btn" id="toggle-all" type="button">Expand all</button>
+    <button class="btn primary" id="zoom-toggle" type="button">Projector zoom: off</button>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Learn LLM Inference and Model Serving with Phoebe · Session 2 of 6</div>
+    <h1>Routing: not every question needs <span class="accent">the big model</span></h1>
+    <p class="sub">The cheapest decode step is the one a big model never takes. Plenty of requests ("rewrite this sentence", "what is our refund window") get a perfectly good answer from a model that costs a fraction as much. The hard part is knowing which ones before you have the answer. Tonight we look at the three ways teams pick a model per request, treat a router as what it really is, a classifier whose mistakes have a price, and route 2,000 real prompts at three thresholds to find the cheapest setting that still clears Kiln's quality floor.</p>
+    <div class="chip-row">
+      <span class="chip level">🟡 Core</span>
+      <span class="chip audience">Builders who own the bill</span>
+      <span class="chip audience">Runs in the browser</span>
+      <span class="chip time">45 min</span>
+    </div>
+    <div class="agenda">
+      <span class="a1" style="flex:1">0-3 · Welcome</span>
+      <span class="a2" style="flex:4">3-18 · Tiers, routers, the frontier</span>
+      <span class="a3" style="flex:5">18-40 · Build-along: route 2,000 prompts</span>
+      <span class="a4" style="flex:1">40-45 · Q&amp;A</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="section" id="intro">
+    <div class="section-kicker">
+      <span class="klabel">Part 0</span>
+      <h2>Where Kiln stands after session 1</h2>
+    </div>
+    <p class="lede">Constructed Kiln example. Maya now knows Kiln's request splits into a prefill budget and a decode budget, and that every one of those requests goes to one large API model. Theo's question is blunt: does the help-centre lookup really need the same model as the multi-step data question? Kiln, Maya, Theo and the 95% quality floor are invented for teaching. The prompts are real: 2,000 held-out rows from RouteLLM's released dataset, each with a big-model answer (GPT-4), a small-model answer (Mixtral 8x7B) and a 1 to 5 score GPT-4 gave the small answer as judge. Every routing number on this page is computed from those rows in your browser.</p>
+
+    <div class="legend">
+      <span class="pill">🎫 Clear all three quiz questions to stamp your passport</span>
+      <span class="pill">Live = presented in the 45 minutes</span>
+      <span class="pill">Self-study = the full depth, after class</span>
+      <span class="pill">★ Build-along = do it yourself</span>
+    </div>
+
+    <div class="callout win">
+      <p><strong>★ What you walk out with tonight.</strong> The three shapes of model selection and when each one fits, the two ways a router fails and what each failure costs, a way to read a cost against quality frontier with a floor drawn on it, and Kiln's routing line: one threshold, its acceptable-answer rate, its saving, and a date to re-measure it.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-1">
+    <div class="section-kicker">
+      <span class="klabel">Part 1 · covers fixed tiers and cascades</span>
+      <h2>Three ways to pick a model per request</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">There are only three places the decision can happen. Before any traffic, by a table: this feature or this customer plan gets this model. After a small model has answered, by a check: is this good enough, and if not, ask the big one. Or from the prompt alone, by a scorer that runs before any model does. Each shape pays for its decision in a different currency: the table pays in blindness, the cascade in latency, the router in its own mistakes.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Three mechanisms side by side. Fixed tiers: a lookup table maps the free plan to the small model, the paid plan and the code feature to the big model, decided before any traffic. Cascade: the small model answers first, a check decides whether it is good enough, and only failures go on to the big model, so an escalated request waits for the small call, the check and the big call in a row. Router: the prompt is scored between 0 and 1 before any model runs, and the score sends it to exactly one model.">
+        <defs>
+          <filter id="p2aSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="31" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p2aHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p2aAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p2aH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p2aL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p2aS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p2aB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p2aW { font: 800 12px Inter, sans-serif; fill: #FFFFFF; }
+          .p2aN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p2aH" x="40" y="30">1 · FIXED TIERS</text>
+        <text class="p2aH" x="320" y="30">2 · CASCADE</text>
+        <text class="p2aH" x="600" y="30">3 · LEARNED ROUTER</text>
+
+        <g filter="url(#p2aSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="56" width="230" height="32" rx="5" transform="rotate(-0.5 155 72)" fill="#FDEFE8"/>
+          <rect x="40" y="98" width="230" height="32" rx="5" transform="rotate(0.4 155 114)" fill="url(#p2aHc)"/>
+          <rect x="40" y="140" width="230" height="32" rx="5" transform="rotate(-0.4 155 156)" fill="url(#p2aHc)"/>
+
+          <rect x="330" y="56" width="140" height="34" rx="6" transform="rotate(-0.5 400 73)" fill="#FDEFE8"/>
+          <path d="M400 92 L400 118" marker-end="url(#p2aAr)"/>
+          <rect x="330" y="120" width="140" height="34" rx="6" transform="rotate(0.5 400 137)" fill="#FFFFFF"/>
+          <path d="M400 156 L400 182" marker-end="url(#p2aAr)"/>
+          <rect x="330" y="184" width="140" height="34" rx="6" transform="rotate(-0.4 400 201)" fill="url(#p2aHc)"/>
+          <rect x="330" y="246" width="60" height="18" rx="3" fill="#FDEFE8"/>
+          <rect x="390" y="246" width="22" height="18" rx="3" fill="#FFFFFF"/>
+          <rect x="412" y="246" width="138" height="18" rx="3" fill="url(#p2aHc)"/>
+
+          <rect x="660" y="56" width="130" height="34" rx="6" transform="rotate(0.5 725 73)" fill="#FFFFFF"/>
+          <path d="M725 92 L725 118" marker-end="url(#p2aAr)"/>
+          <rect x="640" y="120" width="170" height="38" rx="6" transform="rotate(-0.5 725 139)" fill="#145868"/>
+          <path d="M700 160 L660 192" marker-end="url(#p2aAr)"/>
+          <path d="M750 160 L790 192" marker-end="url(#p2aAr)"/>
+          <rect x="606" y="194" width="104" height="34" rx="6" transform="rotate(0.4 658 211)" fill="#FDEFE8"/>
+          <rect x="740" y="194" width="104" height="34" rx="6" transform="rotate(-0.4 792 211)" fill="url(#p2aHc)"/>
+        </g>
+
+        <text class="p2aL" x="54" y="77">free plan: small model</text>
+        <text class="p2aL" x="54" y="119">paid plan: big model</text>
+        <text class="p2aL" x="54" y="161">code feature: big model</text>
+        <text class="p2aS" x="40" y="200">decided by a table, before any traffic</text>
+        <text class="p2aS" x="40" y="216">cheap and predictable,</text>
+        <text class="p2aS" x="40" y="232">blind to what the prompt asks</text>
+
+        <text class="p2aL" x="400" y="78" text-anchor="middle">small model</text>
+        <text class="p2aL" x="400" y="142" text-anchor="middle">check: good enough?</text>
+        <text class="p2aL" x="400" y="206" text-anchor="middle">big model</text>
+        <text class="p2aS" x="480" y="142">yes: ship it</text>
+        <text class="p2aS" x="408" y="176">no</text>
+        <text class="p2aB" x="330" y="240">escalated request waits for all three</text>
+        <text class="p2aS" x="330" y="282">small + check + big, back to back</text>
+
+        <text class="p2aL" x="725" y="78" text-anchor="middle">prompt only</text>
+        <text class="p2aW" x="725" y="144" text-anchor="middle">score 0 to 1</text>
+        <text class="p2aL" x="658" y="216" text-anchor="middle">small</text>
+        <text class="p2aL" x="792" y="216" text-anchor="middle">big</text>
+        <text class="p2aS" x="658" y="246" text-anchor="middle">high score</text>
+        <text class="p2aS" x="792" y="246" text-anchor="middle">low score</text>
+        <text class="p2aS" x="606" y="270">one cheap scoring step,</text>
+        <text class="p2aS" x="606" y="286">then exactly one model</text>
+
+        <text class="p2aN" x="40" y="320">Tiers decide by table, cascades decide after a small answer, routers decide from the prompt alone.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the three shapes differ only in when the decision is made, and that sets what it costs</figcaption>
+    </figure>
+
+    <details class="card" open>
+      <summary><span class="mode live">Live</span>Fixed tiers: a table, not a model<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>The simplest router is a lookup. The free plan gets the small model; enterprise gets the big one. The autocomplete box gets the small model; the "analyse this spreadsheet" button gets the big one. Nothing is scored, nothing is trained, and the bill is easy to forecast because the mix of features is the mix of models.</p>
+        <p>Its weakness is that it is blind to the request. A paid customer asking for a one-line rewrite still pays the big model's price, and a free customer with a genuinely hard question gets a weak answer. Tiers are the right first move when your features differ sharply in difficulty. When difficulty varies inside one feature, as it does in Kiln's single chat box, a table cannot see it.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Cascades: ask small first, escalate on doubt<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>A cascade sends every request to the cheap model first, then runs a check on the answer: a scorer, a confidence threshold, a rule. If the check passes, ship the cheap answer. If it fails, call the next, bigger model. The decision is made with more information than a router has, because it can look at an actual answer.</p>
+        <p>The price is paid twice over. Every request pays for the small call, including the ones that end up escalated. And an escalated request waits for the small call, the check and the big call one after another, so the slowest users get slower. For a chat box where time to first token is the complaint, that tail matters. For overnight batch work, it often does not.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>FrugalGPT's cascade.</strong> Chen, Zaharia and Zou (2023) start from the observation that API fees "can differ by two orders of magnitude" between models, then chain models from cheap to expensive with a learned scorer deciding when to stop. On their tasks the cascade can "match the performance of the best individual LLM (e.g. GPT-4) with up to 98% cost reduction or improve the accuracy over GPT-4 by 4% with the same cost". Note the "up to" and "on their tasks": the saving is a property of the task mix as much as of the method, which is the thread through the rest of tonight.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>What a cascade really costs, in one line<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Write the cascade's cost per request as: small call, always paid, plus the check, plus the big call times the share of requests that escalate. Write its latency for an escalated request as: small call plus check plus big call. A router's cost is: scorer, plus whichever single model it picked. So a cascade beats a router on cost only when its check is much better at spotting failures than a router's guess, enough to outweigh paying the small model on every request. If your small model's answers are long, that always-paid small call is not small at all.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-2">
+    <div class="section-kicker">
+      <span class="klabel">Part 2 · covers learned routers</span>
+      <h2>A router is a classifier with a price tag</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">A learned router reads the prompt, outputs a score between 0 and 1 for "the small model will do fine here", and compares it to a threshold. Above the threshold, small model; below it, big model. That is a binary classifier, and like every classifier it makes two kinds of mistake. Here each mistake has a price: one is paid by your users in quality, the other by you in dollars. The threshold is the dial that trades them.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 372" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The router mechanism. A prompt, before any model runs, is turned into 12 text features such as length, code marks and maths words. A logistic model turns them into a score between 0 and 1. If the score is at least the threshold the request goes to the small model, otherwise to the big model. Two error types: a weak answer shipped, when a request sent small gets a judge score of 1 to 3, which is 87 of 2,000 at threshold 0.87; and a wasted big call, when a request sent big would have been fine on the small model, which costs money but no user sees.">
+        <defs>
+          <filter id="p2bSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="37" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p2bHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p2bAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p2bH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p2bL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p2bS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p2bB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p2bW { font: 800 12px Inter, sans-serif; fill: #FFFFFF; }
+          .p2bR { font: 800 12px Inter, sans-serif; fill: #991B1B; }
+          .p2bN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p2bH" x="40" y="26">ONE REQUEST THROUGH KILN'S CHEAP ROUTER, BEFORE ANY MODEL RUNS</text>
+
+        <g filter="url(#p2bSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="70" width="130" height="70" rx="8" transform="rotate(-0.5 105 105)" fill="#FFFFFF"/>
+          <path d="M172 105 L198 105" marker-end="url(#p2bAr)"/>
+          <rect x="200" y="70" width="160" height="70" rx="8" transform="rotate(0.4 280 105)" fill="#FDEFE8"/>
+          <path d="M362 105 L388 105" marker-end="url(#p2bAr)"/>
+          <rect x="390" y="70" width="150" height="70" rx="8" transform="rotate(-0.4 465 105)" fill="#145868"/>
+          <path d="M542 105 L568 105" marker-end="url(#p2bAr)"/>
+          <rect x="570" y="70" width="120" height="70" rx="8" transform="rotate(0.5 630 105)" fill="#FFFFFF"/>
+          <path d="M692 95 L726 70" marker-end="url(#p2bAr)"/>
+          <path d="M692 115 L726 140" marker-end="url(#p2bAr)"/>
+          <rect x="730" y="46" width="120" height="44" rx="6" transform="rotate(-0.5 790 68)" fill="#FDEFE8"/>
+          <rect x="730" y="122" width="120" height="44" rx="6" transform="rotate(0.5 790 144)" fill="url(#p2bHc)"/>
+
+          <rect x="40" y="214" width="390" height="104" rx="10" transform="rotate(-0.4 235 266)" fill="#FEF2F2" stroke="#991B1B"/>
+          <rect x="460" y="214" width="390" height="104" rx="10" transform="rotate(0.4 655 266)" fill="#FFFFFF"/>
+        </g>
+
+        <text class="p2bL" x="105" y="100" text-anchor="middle">prompt text</text>
+        <text class="p2bS" x="105" y="118" text-anchor="middle">no model yet</text>
+        <text class="p2bL" x="280" y="94" text-anchor="middle">12 text features</text>
+        <text class="p2bS" x="280" y="112" text-anchor="middle">length, code, maths</text>
+        <text class="p2bS" x="280" y="128" text-anchor="middle">words, question marks</text>
+        <text class="p2bW" x="465" y="100" text-anchor="middle">score 0 to 1</text>
+        <text class="p2bW" x="465" y="118" text-anchor="middle">logistic model</text>
+        <text class="p2bL" x="630" y="100" text-anchor="middle">score at least</text>
+        <text class="p2bL" x="630" y="118" text-anchor="middle">the threshold?</text>
+        <text class="p2bS" x="700" y="58">yes</text>
+        <text class="p2bS" x="700" y="156">no</text>
+        <text class="p2bL" x="790" y="73" text-anchor="middle">small model</text>
+        <text class="p2bL" x="790" y="149" text-anchor="middle">big model</text>
+
+        <text class="p2bB" x="40" y="184">At threshold 0.87 the router sends 59.0% of the 2,000 prompts small (computed).</text>
+
+        <text class="p2bR" x="58" y="240">ERROR 1 · WEAK ANSWER SHIPPED</text>
+        <text class="p2bS" x="58" y="262">sent small, and the judge scored the small answer 1 to 3</text>
+        <text class="p2bS" x="58" y="280">the user sees it: 87 of 2,000 at 0.87 (computed)</text>
+        <text class="p2bS" x="58" y="298">raise the threshold to ship fewer</text>
+        <text class="p2bH" x="478" y="240">ERROR 2 · WASTED BIG CALL</text>
+        <text class="p2bS" x="478" y="262">sent big when the small answer would have scored 4 or 5</text>
+        <text class="p2bS" x="478" y="280">no user sees it; the bill does</text>
+        <text class="p2bS" x="478" y="298">lower the threshold to waste fewer</text>
+
+        <text class="p2bN" x="40" y="348">One dial trades the two errors. AUC says how well the score separates them: 0.662 here, 0.5 is a coin.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the threshold does not remove mistakes, it chooses which kind you pay for</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>What RouteLLM actually trained<span class="mini">4 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Ong et al. (2024), "RouteLLM: Learning to Route LLMs with Preference Data", train routers between a strong model (gpt-4-1106-preview) and a weak one (Mixtral 8x7B). The training signal is human preference: 80k Chatbot Arena battles, about 65k comparisons after filtering, plus an augmentation of about 120K samples labelled by GPT-4 as judge, which cost them about $700. That price is worth remembering. Labelled routing data is cheap next to a month of big-model traffic.</p>
+        <p>They compare four routers: similarity-weighted ranking, matrix factorization, a BERT classifier and a causal LLM classifier. Their headline is that routing can "reduce costs by over 2 times without sacrificing response quality". They measure quality as PGR, the share of the gap between the weak and the strong model's score that the routed system recovers, and report cost savings at a given PGR. The code and the dataset are Apache-2.0, which is why the rows under tonight's widget are theirs.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>How much routing saves depends on who measured<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Put the claims side by side and they do not agree, and they are not supposed to. The RouteLLM paper says "over 2 times". Its own Table 6, at 50% PGR, gives a cost-saving ratio of 3.66x on MT Bench but 1.41x on MMLU. The project's README says "up to 85%" (reported: a README claim, not a paper result). FrugalGPT says "up to 98%" on its tasks. Kiln's cheap router, on 2,000 RouteLLM rows with a 95% floor, saves 45.9% (computed, below).</p>
+        <p>Each number is its own benchmark with its own quality bar and its own price gap. None of them is your number. The professional move is to hold the range in your head and measure on your own traffic, which is what the build-along does.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>RouterBench and a licence check.</strong> Hu et al. (2024), "RouterBench: A Benchmark for Multi-LLM Routing System", collect "over 405k inference outcomes" across tasks such as MMLU, GSM8K, MBPP and MT-Bench. It is the bigger benchmark. Its code is MIT, but its dataset card on Hugging Face states no licence, and without a stated licence redistribution is not granted. So the paper is read and cited, and the rows shipped here are RouteLLM's Apache-2.0 ones. Check the licence of routing data before you copy it into a product.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Kiln's router is cheap and weak on purpose<span class="mini">4 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>The router behind the widget is ours, not RouteLLM's. It is a logistic regression on 12 features of the prompt text alone: prompt length, line count, code marks, digit share, maths words, creative words, reasoning words, question marks, non-ASCII share, rewrite verbs, format words and word count. It was fit with scikit-learn on RouteLLM's train split to predict "the judge scored the small answer 4 or 5".</p>
+        <p>On the 2,000 sampled rows its AUC is 0.662 (computed). A router that only looks at prompt length scores 0.631, and the same scores scrambled across prompts score 0.529; 0.5 is a coin. So it carries a real but modest signal. That is deliberate: if a router this crude pays for itself, a trained one like RouteLLM's has room to do better, and you can see every moving part.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-3">
+    <div class="section-kicker">
+      <span class="klabel">Part 3 · covers the frontier and the floor</span>
+      <h2>Read the frontier, then draw the floor</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">Plot every routing policy as one point: cost per 1,000 requests across, acceptable answers up. The quality bar is constructed: an answer is acceptable when the judge scored it 4 or 5, and the big model's answer is the judge's reference, so anything routed big counts as acceptable. Then draw a horizontal line at the quality you refuse to go below. For Kiln that floor is 95%. The question stops being "how much can we save" and becomes "what is the cheapest point above the line".</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 436" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cost against quality for Kiln's routing policies on 2,000 real prompts at gpt-4.1 and gpt-4.1-mini prices. Everything big: $4.60 per 1,000 at 100.0% acceptable. Everything small: $0.98 at 87.1%. Hindsight ceiling: $1.44 at 100.0%. Learned router at 0.85: $2.15 at 93.4%; at 0.87: $2.49 at 95.7%; at 0.90: $3.08 at 97.4%. Scrambled router at 0.87: 92.7%. The 95% floor line rules out 0.85, the scrambled router and everything small.">
+        <defs>
+          <filter id="p2cSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="41" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p2cHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p2cAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p2cH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p2cL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p2cS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p2cB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p2cN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p2cH" x="40" y="26">2,000 REAL PROMPTS, GPT-4.1 / GPT-4.1-MINI PRICES: EVERY POLICY IS ONE POINT</text>
+        <text class="p2cS" x="80" y="46">acceptable answers</text>
+
+        <g filter="url(#p2cSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M80 360 L820 360" marker-end="url(#p2cAr)"/>
+          <path d="M80 360 L80 54" marker-end="url(#p2cAr)"/>
+          <path d="M228 360 L228 366 M376 360 L376 366 M524 360 L524 366 M672 360 L672 366 M820 360 L820 366"/>
+          <path d="M74 260 L80 260 M74 160 L80 160 M74 60 L80 60"/>
+          <path d="M80 160 L820 160" stroke="#145868" stroke-width="2.6" stroke-dasharray="8 6"/>
+          <path d="M398 192 L449 146 L536 112" stroke="#B82500" stroke-width="2.4"/>
+          <circle cx="398" cy="192" r="6" fill="#FFFFFF" stroke="#B82500"/>
+          <circle cx="449" cy="146" r="7" fill="#B82500" stroke="#7A1A04"/>
+          <circle cx="536" cy="112" r="6" fill="#FFFFFF" stroke="#B82500"/>
+          <circle cx="225" cy="318" r="6" fill="url(#p2cHc)"/>
+          <circle cx="761" cy="60" r="6" fill="url(#p2cHc)"/>
+          <circle cx="293" cy="60" r="6" fill="#FFFFFF" stroke-dasharray="3 3"/>
+          <circle cx="443" cy="214" r="6" fill="#FDEFE8" stroke="#6E4A3F"/>
+        </g>
+
+        <text class="p2cS" x="70" y="364" text-anchor="end">85%</text>
+        <text class="p2cS" x="70" y="264" text-anchor="end">90%</text>
+        <text class="p2cS" x="70" y="164" text-anchor="end">95%</text>
+        <text class="p2cS" x="70" y="64" text-anchor="end">100%</text>
+        <text class="p2cS" x="80" y="380" text-anchor="middle">$0</text>
+        <text class="p2cS" x="228" y="380" text-anchor="middle">$1</text>
+        <text class="p2cS" x="376" y="380" text-anchor="middle">$2</text>
+        <text class="p2cS" x="524" y="380" text-anchor="middle">$3</text>
+        <text class="p2cS" x="672" y="380" text-anchor="middle">$4</text>
+        <text class="p2cS" x="820" y="380" text-anchor="middle">$5</text>
+        <text class="p2cS" x="450" y="400" text-anchor="middle">cost per 1,000 requests</text>
+
+        <text class="p2cL" x="305" y="64">hindsight: 100.0%, $1.44</text>
+        <text class="p2cL" x="749" y="84" text-anchor="end">everything big: 100.0%, $4.60</text>
+        <text class="p2cL" x="548" y="116">0.90: 97.4%, $3.08</text>
+        <text class="p2cL" x="437" y="134" text-anchor="end">0.87: 95.7%, $2.49</text>
+        <text class="p2cL" x="386" y="196" text-anchor="end">0.85: 93.4%, $2.15</text>
+        <text class="p2cS" x="455" y="230">scrambled at 0.87: 92.7%</text>
+        <text class="p2cL" x="237" y="322">everything small: 87.1%, $0.98</text>
+        <text class="p2cB" x="820" y="152" text-anchor="end">Kiln's 95% floor</text>
+
+        <text class="p2cN" x="40" y="424">Computed on RouteLLM rows. Up and left is better; nothing below the floor is allowed, however cheap.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - 0.87 is the cheapest learned point above the line; hindsight shows how far a perfect router could go</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Two corners and a ceiling<span class="mini">4 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p><strong>Everything big</strong> is Kiln today: $4.60 per 1,000 requests at 100.0% acceptable, by construction. <strong>Everything small</strong> is the anti-lever: $0.98 per 1,000, a 78.7% saving, and 87.1% acceptable, which ships 259 weak answers per 2,000 requests. It is the cheapest point on the chart and it is below the floor, so it is not an option, however good the saving looks on a slide.</p>
+        <p><strong>Hindsight</strong> routes on the judge's score, which no router can know in advance. It sends 87.1% small, keeps 100.0% acceptable and costs $1.44, a 68.7% saving. It is a ceiling, not a target: the distance between it and your router is how much a better router could still earn.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>The break button: does the router know anything?<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>A router that saves money might simply be sending a fixed share of traffic small at random. To test that, scramble it: each prompt reads another prompt's score. The share sent small is unchanged, so the cost barely moves, but any real signal is destroyed. At threshold 0.87 the same 59.0% go small and acceptable falls from 95.7% to 92.7%, with 147 weak answers instead of 87 (computed).</p>
+        <p>The scrambled router can still clear the floor, but only by sending far less traffic small: its cheapest threshold above 95% is 0.91, which saves 26.7% against the learned router's 45.9%. That gap is what the signal is worth. Run this test on any router a vendor sells you.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>The same router, a different benchmark, a different saving.</strong> RouteLLM's Table 6 reports cost-saving ratios at 50% PGR of 3.66x on MT Bench, 1.49x on GSM8K and 1.41x on MMLU. Same routers, same strong and weak model. Open-ended chat has many prompts the weak model handles fine; a knowledge exam has fewer. Your traffic mix decides where on that spread you land, which is why a published saving is a reason to measure, not a forecast.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>The length router, a fair cheap rival<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Before trusting any learned router, compare it to the dumbest one that could work: short prompts go small. On these rows the cheapest length cut that clears the floor is "up to 50" estimated tokens, which gives 95.5% acceptable at $2.61 per 1,000, a 43.2% saving (computed). The learned router at 0.87 does a little better: 95.7% at $2.49 and 45.9%. A small margin. If your learned router cannot beat a length rule on your traffic, ship the length rule: it has nothing to retrain and nothing to drift.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="demo-1">
+    <div class="section-kicker">
+      <span class="klabel">Build-along</span>
+      <h2>Route 2,000 real prompts at three thresholds</h2>
+      <span class="tag demo">★ 22 min · everyone builds</span>
+    </div>
+    <p class="lede">Constructed Kiln example, real prompts. The widget scores each of the 2,000 RouteLLM rows with Kiln's cheap router, sends it small or big by your threshold, and prices the result with Kiln's constructed 1,200-token system prompt added to every request. The small model in these rows is Mixtral 8x7B, scored 1 to 5 by GPT-4 as judge; it is a different small model from the Llama 3.1 8B that sessions 3 and 4 serve, so the routing numbers teach the shape and your own small model needs its own measurement.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 336" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Three thresholds side by side. At 0.85: 67.4% sent small, 93.4% acceptable, $2.15 per 1,000, 132 weak answers, 53.3% saving, fails the 95% floor. At 0.87: 59.0% sent small, 95.7% acceptable, $2.49, 87 weak answers, 45.9% saving, the cheapest that clears. At 0.90: 42.7% sent small, 97.4% acceptable, $3.08, 53 weak answers, 33.0% saving.">
+        <defs>
+          <filter id="p2dSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="43" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p2dHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p2dAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p2dH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p2dL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p2dS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p2dB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p2dD { font: 800 11px Inter, sans-serif; fill: #7A1A04; }
+          .p2dN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p2dH" x="40" y="26">KILN'S ROUTER AT THREE THRESHOLDS, SAME 2,000 PROMPTS, SAME PRICES</text>
+
+        <g filter="url(#p2dSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="50" width="250" height="240" rx="10" transform="rotate(-0.4 165 170)" fill="#FFFFFF"/>
+          <rect x="315" y="50" width="250" height="240" rx="10" transform="rotate(0.3 440 170)" fill="#FFFFFF" stroke="#145868" stroke-width="2.8"/>
+          <rect x="590" y="50" width="250" height="240" rx="10" transform="rotate(-0.3 715 170)" fill="#FFFFFF"/>
+
+          <rect x="60" y="108" width="135" height="14" rx="3" fill="#FDEFE8"/>
+          <rect x="60" y="158" width="112" height="14" rx="3" fill="#FDEFE8"/>
+          <rect x="60" y="208" width="94" height="14" rx="3" fill="url(#p2dHc)"/>
+          <path d="M193 154 L193 178" stroke="#145868" stroke-width="2.6"/>
+
+          <rect x="335" y="108" width="118" height="14" rx="3" fill="#FDEFE8"/>
+          <rect x="335" y="158" width="143" height="14" rx="3" fill="#FDEFE8"/>
+          <rect x="335" y="208" width="108" height="14" rx="3" fill="url(#p2dHc)"/>
+          <path d="M468 154 L468 178" stroke="#145868" stroke-width="2.6"/>
+
+          <rect x="610" y="108" width="85" height="14" rx="3" fill="#FDEFE8"/>
+          <rect x="610" y="158" width="165" height="14" rx="3" fill="#FDEFE8"/>
+          <rect x="610" y="208" width="134" height="14" rx="3" fill="url(#p2dHc)"/>
+          <path d="M743 154 L743 178" stroke="#145868" stroke-width="2.6"/>
+        </g>
+
+        <text class="p2dH" x="60" y="76">at 0.85</text>
+        <text class="p2dD" x="272" y="76" text-anchor="end">fails the floor</text>
+        <text class="p2dL" x="60" y="100">sent small: 67.4%</text>
+        <text class="p2dL" x="60" y="150">acceptable: 93.4%</text>
+        <text class="p2dL" x="60" y="200">cost: $2.15 per 1,000</text>
+        <text class="p2dS" x="60" y="248">weak answers shipped: 132</text>
+        <text class="p2dS" x="60" y="266">saving: 53.3%</text>
+
+        <text class="p2dH" x="335" y="76">at 0.87</text>
+        <text class="p2dB" x="547" y="76" text-anchor="end">cheapest that clears</text>
+        <text class="p2dL" x="335" y="100">sent small: 59.0%</text>
+        <text class="p2dL" x="335" y="150">acceptable: 95.7%</text>
+        <text class="p2dL" x="335" y="200">cost: $2.49 per 1,000</text>
+        <text class="p2dS" x="335" y="248">weak answers shipped: 87</text>
+        <text class="p2dS" x="335" y="266">saving: 45.9%</text>
+
+        <text class="p2dH" x="610" y="76">at 0.90</text>
+        <text class="p2dS" x="822" y="76" text-anchor="end">clears, costs more</text>
+        <text class="p2dL" x="610" y="100">sent small: 42.7%</text>
+        <text class="p2dL" x="610" y="150">acceptable: 97.4%</text>
+        <text class="p2dL" x="610" y="200">cost: $3.08 per 1,000</text>
+        <text class="p2dS" x="610" y="248">weak answers shipped: 53</text>
+        <text class="p2dS" x="610" y="266">saving: 33.0%</text>
+
+        <text class="p2dN" x="40" y="318">Computed, gpt-4.1 / gpt-4.1-mini prices. Acceptable bars start at 85%; the teal tick is the 95% floor.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - each step up the threshold buys quality with saving; 0.87 is the first step that lands above the floor</figcaption>
+    </figure>
+
+    <div class="inf-widget" data-part="router" data-policy="learned" data-t="850"></div>
+
+    <div class="steps">
+      <div class="step">
+        <p><strong>Start at threshold 0.85 and read the verdict line.</strong> Learned router, gpt-4.1 / gpt-4.1-mini prices, scramble off. It looks like a great deal until you read the quality tile.</p>
+        <div class="prompt-box good"><span class="label">★ Step 1 · threshold 0.85</span>Sent to the small model:  67.4%  (1,348 of 2,000)
+Acceptable answers:       93.4%  (1,868 of 2,000)
+Weak answers shipped:     132
+Cost per 1,000 requests:  $2.15   saving 53.3%
+Verdict: fails Kiln's 95% floor.</div>
+      </div>
+      <div class="step">
+        <p><strong>Slide to 0.87.</strong> Fewer requests go small, quality climbs past the line, and the saving shrinks. This is the cheapest learned threshold that clears the floor.</p>
+        <div class="prompt-box good"><span class="label">★ Step 2 · threshold 0.87</span>Sent to the small model:  59.0%  (1,179 of 2,000)
+Acceptable answers:       95.7%  (1,913 of 2,000)
+Weak answers shipped:     87
+Cost per 1,000 requests:  $2.49   saving 45.9%
+Verdict: clears. Cheapest threshold that does.</div>
+      </div>
+      <div class="step">
+        <p><strong>Slide to 0.90 to see what extra safety costs.</strong> Every step up buys quality with saving. Whether 97.4% is worth giving up the difference in saving is Theo's call, not the router's.</p>
+        <div class="prompt-box good"><span class="label">★ Step 3 · threshold 0.90</span>Sent to the small model:  42.7%  (854 of 2,000)
+Acceptable answers:       97.4%  (1,947 of 2,000)
+Weak answers shipped:     53
+Cost per 1,000 requests:  $3.08   saving 33.0%</div>
+      </div>
+      <div class="step">
+        <p><strong>Go back to 0.87 and tick the break button.</strong> The share sent small stays put; the quality falls. That drop is the proof that the router's scores carry information about the prompt.</p>
+        <div class="prompt-box good"><span class="label">★ Step 4 · scrambled at 0.87</span>Sent to the small model:  59.0%   (unchanged)
+Acceptable answers:       92.7%   (was 95.7%)
+Weak answers shipped:     147     (was 87)
+Router signal (AUC):      0.529   (learned: 0.662; a coin: 0.5)</div>
+      </div>
+      <div class="step">
+        <p><strong>Untick scramble and switch the price preset.</strong> Same routing, same quality, different price lists. The saving moves with the price gap between the two models.</p>
+        <div class="prompt-box good"><span class="label">★ Step 5 · the price gap decides the saving</span>gpt-5 / gpt-5-mini, threshold 0.87:
+  $2.21 per 1,000  vs  $4.12 everything big   saving 46.5%
+RouteLLM paper's 2024 prices (GPT-4 / Mixtral), threshold 0.87:
+  $8.79 per 1,000  vs  $20.49 everything big  saving 57.1%
+  everything small: $0.38 per 1,000, a 98.1% saving, still 87.1% acceptable</div>
+      </div>
+      <div class="step">
+        <p><strong>Write Kiln's routing line.</strong> One line Maya can paste into the plan, with the number that proves it and a date it stops being true.</p>
+        <div class="prompt-box good"><span class="label">★ Step 6 · Kiln's routing line</span>Route with the learned router at threshold 0.87:
+  95.7% acceptable (floor 95%), 45.9% cheaper than everything on gpt-4.1.
+  Quality judged by GPT-4 on Mixtral 8x7B answers; re-measure with our own small model.
+  Re-measure monthly, and whenever a price, a model or the traffic mix changes.</div>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <p><strong>Your numbers will differ.</strong> Your prompts, your small model, your judge and your price gap all move the frontier. Keep the method: a floor someone signed, the cheapest threshold above it, a scramble test, and a monthly re-measure.</p>
+    </div>
+  </section>
+
+  <section class="section" id="exercise">
+    <div class="section-kicker">
+      <span class="klabel">Homework</span>
+      <h2>Before session 3</h2>
+      <span class="tag exercise">30 min</span>
+    </div>
+    <ol>
+      <li><strong>Label 100 of your own requests.</strong> Run each through your big and your candidate small model and score the small answer against the big one, by hand or with a judge model. That is your first frontier.</li>
+      <li><strong>Compute your price gap.</strong> Divide your big model's input and output prices by your small model's. Step 5 showed the saving tracks the gap.</li>
+      <li><strong>Pick your floor and who signs it.</strong> Write the acceptable-answer rate you will not go below, and the name of the person who owns that number. A floor nobody signed moves every time the bill hurts.</li>
+      <li><strong>Find your router's two error costs.</strong> What does one weak answer shipped cost you (a ticket, a churned user, a correction)? What does one wasted big call cost (the price difference)? The ratio tells you which side of the threshold to err on.</li>
+    </ol>
+  </section>
+
+  <section class="section" id="quiz">
+    <div class="section-kicker">
+      <span class="klabel">Check yourself</span>
+      <h2>Three routing questions</h2>
+    </div>
+    <p>Clear all three and session 2 gets stamped in your passport.</p>
+
+    <div class="quiz-q" data-answer="2">
+      <p class="qtext">1 · Sending everything to the small model saves 78.7%. Why is it not on Kiln's plan?</p>
+      <button class="qopt" type="button">A · The small model is slower than the big one</button>
+      <button class="qopt" type="button">B · The saving is smaller than the router's</button>
+      <button class="qopt" type="button">C · It is 87.1% acceptable, below the 95% floor, with 259 weak answers per 2,000</button>
+      <button class="qopt" type="button">D · Small models cannot read Kiln's system prompt</button>
+      <p class="qwhy">Everything small is the cheapest point on the chart and the anti-lever: $0.98 per 1,000 but 87.1% acceptable. The floor rules it out before cost is even compared.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="0">
+      <p class="qtext">2 · At threshold 0.87, scrambling the router keeps 59.0% going small but drops acceptable answers from 95.7% to 92.7%. What does that prove?</p>
+      <button class="qopt" type="button">A · The router's scores carry real information about which prompts the small model handles</button>
+      <button class="qopt" type="button">B · The router is broken and should be replaced by random routing</button>
+      <button class="qopt" type="button">C · The small model got worse when the scores were shuffled</button>
+      <button class="qopt" type="button">D · Cost and quality are unrelated</button>
+      <p class="qwhy">Scrambling keeps the share and the cost the same but destroys the link between prompt and score. Quality falls, so the link was doing work. AUC tells the same story: 0.662 learned against 0.529 scrambled.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="3">
+      <p class="qtext">3 · RouteLLM reports a 3.66x cost saving on MT Bench but 1.41x on MMLU, at the same 50% PGR. Why?</p>
+      <button class="qopt" type="button">A · MMLU was run with older prices</button>
+      <button class="qopt" type="button">B · One of the two numbers is a typo in the paper</button>
+      <button class="qopt" type="button">C · The routers were different on each benchmark</button>
+      <button class="qopt" type="button">D · How many prompts the weak model handles well depends on the task mix, so the saving does too</button>
+      <p class="qwhy">Same routers, same models, different traffic. Open-ended chat has more prompts the weak model handles; an exam has fewer. Your own traffic mix sets your saving.</p>
+    </div>
+
+    <p class="quiz-score"></p>
+  </section>
+
+  <section class="section" id="official">
+    <div class="section-kicker">
+      <span class="klabel">Sources covered</span>
+      <h2>What this session teaches, and where it came from</h2>
+    </div>
+    <div class="covered">
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Ong et al. 2024, RouteLLM: Learning to Route LLMs with Preference Data; routellm/gpt4_dataset (Apache-2.0)</span><span class="note">Four routers, training data, Table 6 savings by benchmark; 2,000 held-out rows behind every computed number on this page, matched by an independent Python run</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Chen, Zaharia, Zou 2023, FrugalGPT</span><span class="note">Price spread between APIs and the cascade result, quoted from the abstract</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Hu et al. 2024, RouterBench: A Benchmark for Multi-LLM Routing System</span><span class="note">Paper read; data not redistributed because its dataset card states no licence</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">OpenAI price list: gpt-4.1, gpt-4.1-mini, gpt-5, gpt-5-mini</span><span class="note">Read 2026-11-08, re-verify before delivery</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">Kiln, Maya, Theo, the 1,200-token system prompt and the 95% floor</span><span class="note">Constructed for teaching; the "acceptable = judge score 4 or 5" bar is ours, not the RouteLLM paper's</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">The cheap 12-feature router</span><span class="note">Ours, not RouteLLM's: a logistic regression fit on RouteLLM's train split, deliberately weak</span></div>
+    </div>
+    <p class="mono" style="margin-top:14px">Every fact on this page, and its verification tier, is recorded in the course's source map.</p>
+  </section>
+
+  <section class="cheat" id="cheatsheet">
+    <h3>Session 2 cheat sheet <span>· pin this</span></h3>
+    <div class="grid-2">
+      <div class="cheat-item"><b>Three shapes</b><span>Tiers decide by table, cascades after a small answer, routers from the prompt alone.</span></div>
+      <div class="cheat-item"><b>Two errors</b><span>Weak answer shipped costs quality; wasted big call costs money. The threshold trades them.</span></div>
+      <div class="cheat-item"><b>Floor first</b><span>Pick the quality floor, then the cheapest threshold above it. Kiln: 0.87, 95.7%, 45.9% cheaper.</span></div>
+      <div class="cheat-item"><b>Break button</b><span>Scramble the scores. If quality does not fall at the same share, the router knows nothing.</span></div>
+      <div class="cheat-item"><b>Beat the dumb rule</b><span>Compare with a length router before trusting a learned one.</span></div>
+      <div class="cheat-item"><b>Savings are local</b><span>MT Bench 3.66x, MMLU 1.41x in the same paper. Measure on your traffic, re-measure monthly.</span></div>
+    </div>
+  </section>
+
+  <div class="callout next">
+    <span class="nx-pill">Next session</span>
+    <p>Routing decides which model answers. Session 3 asks what one GPU actually serves once you run the small model yourself: static against continuous batching, throughput against tail latency, and Kiln's maximum load at the 1 s first-token target.</p>
+  </div>
+
+  <footer class="pagefoot">
+    <span>Session 2 of 6 · learn-llm-inference-with-phoebe · by Phoebe Fu &nbsp;·&nbsp; 📚 <a href="https://phoebefu6.github.io/learn-with-phoebe/">Learn with Phoebe ↗</a></span>
+    <span><a href="01-where-the-money-goes.html">← Prev: Where the money goes</a> &nbsp;·&nbsp; <a href="03-batching.html">Next: Batching →</a></span>
+  </footer>
+
+</main>
+
+<script src="../assets/inf-sample.js?v=1"></script>
+<script src="../assets/inf-live.js?v=1"></script>
+<script src="../assets/inf-ui.js?v=3"></script>
+<script src="../assets/app.js?v=1"></script>
+</body>
+</html>

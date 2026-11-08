@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- social:start -->
+<meta name="description" content="Session 3 of 6. Static batching makes every request wait for the slowest answer; continuous batching refills a slot the step after it frees. Bigger batches raise throughput because one decode step reads the weights once for the whole batch, and they push out the tail of first-token latency. A rented GPU bills by the hour, busy or not, so its cost per request depends on how full you keep it. Build-along: Kiln's max load at a 1 s target on one L4.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Learn with Phoebe">
+<meta property="og:title" content="Batching and the GPU you rent - learn llm inference with phoebe">
+<meta property="og:description" content="Session 3 of 6. Static against continuous batching, throughput against the p95 tail, and what one rented GPU really serves at a latency target.">
+<meta property="og:url" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/courses/03-batching.html">
+<meta property="og:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Batching and the GPU you rent - learn llm inference with phoebe">
+<meta name="twitter:description" content="Session 3 of 6. Find the highest load one L4 serves at Kiln's 1 s first-token target, and what each request costs there, in your browser.">
+<meta name="twitter:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<!-- social:end -->
+<title>Session 3 · Batching and the GPU you rent - learn llm inference with phoebe</title>
+<link rel="stylesheet" href="../assets/style.css?v=1">
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="wrap">
+    <span class="crumb"><a href="../index.html">learn-llm-inference-with-phoebe</a> / Session 3 of 6</span>
+    <button class="btn" id="toggle-all" type="button">Expand all</button>
+    <button class="btn primary" id="zoom-toggle" type="button">Projector zoom: off</button>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Learn LLM Inference and Model Serving with Phoebe · Session 3 of 6</div>
+    <h1>Batching and <span class="accent">the GPU you rent</span></h1>
+    <p class="sub">Session 1 showed that one decode step streams every weight out of memory to make a single token. The obvious move is to make that one read serve many requests at once. That is batching, and how you do it decides whether short answers sit idle behind long ones, how fast the queue grows as traffic rises, and what each request costs on a GPU you pay for by the hour whether it is busy or not. Tonight we find the highest load one rented L4 can carry for Kiln at a 1 second first-token target.</p>
+    <div class="chip-row">
+      <span class="chip level">🟡 Core</span>
+      <span class="chip audience">Builders who own the bill</span>
+      <span class="chip audience">No GPU needed</span>
+      <span class="chip time">45 min</span>
+    </div>
+    <div class="agenda">
+      <span class="a1" style="flex:1">0-3 · Welcome</span>
+      <span class="a2" style="flex:4">3-18 · Batching, the tail, the flat line</span>
+      <span class="a3" style="flex:5">18-40 · Build-along: Kiln's max load</span>
+      <span class="a4" style="flex:1">40-45 · Q&amp;A</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="section" id="intro">
+    <div class="section-kicker">
+      <span class="klabel">Part 0</span>
+      <h2>Where we start</h2>
+    </div>
+    <p class="lede">Constructed Kiln example. Session 2 left Maya with a router that sends the easy requests to a small model. Theo's next question is blunt: if the small side is one open model, why rent it per token from an API when Kiln could rent a whole GPU and run it there? Maya has a price for the GPU. What she does not have is the number that turns a monthly price into a cost per request: how many requests a second that GPU can carry while the slowest five percent of users still see their first word within 1 second, Kiln's constructed target. That number depends almost entirely on batching. The prompt and answer lengths below are Kiln's real request mix from the RouteLLM rows; the GPU behaviour is a labelled model, Llama 3.1 8B on a rented card.</p>
+
+    <div class="legend">
+      <span class="pill">🎫 Clear all three quiz questions to stamp your passport</span>
+      <span class="pill">Live = presented in the 45 minutes</span>
+      <span class="pill">Self-study = the full depth, after class</span>
+      <span class="pill">★ Build-along = do it yourself</span>
+    </div>
+
+    <div class="callout win">
+      <p><strong>★ What you walk out with tonight.</strong> A picture of static against continuous batching and why the second one rescued the tail, the trade between throughput and p95 time to first token as load rises, a way to read a GPU's hourly price as a cost per 1,000 requests at a latency target, and Kiln's capacity line: the highest load one L4 serves at 1 second and what each request costs there.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-1">
+    <div class="section-kicker">
+      <span class="klabel">Part 1 · covers static and continuous batching</span>
+      <h2>Wait for the bus, or let people hop on</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">The first batching servers worked like a bus that only leaves when everyone on it has reached the last stop. A batch of requests starts together and runs, one decode step at a time, until its longest answer is finished. A request with a one-line answer finishes early and then its slot sits empty for the rest of the trip, and new arrivals wait outside until the whole batch is done. Continuous batching changes the unit of scheduling from the batch to the single decode step: after every step, finished requests leave and waiting ones take their place.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 396" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Four request slots on one GPU over time, in two lanes. Static batching: four requests start together; three finish early and their slots sit idle until the longest answer ends, while three new requests wait in a queue outside. Continuous batching: the same four start together, and each slot is refilled with a new request one decode step after its request finishes, so there are no idle gaps and nothing waits.">
+        <defs>
+          <filter id="p3aSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="31" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p3aHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p3aAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p3aH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p3aL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p3aS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p3aB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p3aN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p3aH" x="30" y="26">FOUR SLOTS ON ONE GPU, DECODE STEPS RUNNING LEFT TO RIGHT</text>
+
+        <g filter="url(#p3aSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="66" width="800" height="110" rx="10" transform="rotate(-0.3 440 121)" fill="#FFFFFF"/>
+          <rect x="60" y="100" width="18" height="18" rx="3" fill="#FDEFE8"/>
+          <rect x="84" y="100" width="18" height="18" rx="3" fill="#FDEFE8"/>
+          <rect x="108" y="100" width="18" height="18" rx="3" fill="#FDEFE8"/>
+          <rect x="160" y="78" width="640" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="160" y="102" width="200" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="360" y="102" width="440" height="18" rx="4" fill="url(#p3aHc)"/>
+          <rect x="160" y="126" width="320" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="480" y="126" width="320" height="18" rx="4" fill="url(#p3aHc)"/>
+          <rect x="160" y="150" width="140" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="300" y="150" width="500" height="18" rx="4" fill="url(#p3aHc)"/>
+
+          <rect x="40" y="226" width="800" height="110" rx="10" transform="rotate(0.3 440 281)" fill="#FFFFFF"/>
+          <rect x="60" y="260" width="66" height="18" rx="3" stroke-dasharray="3 5"/>
+          <rect x="160" y="238" width="640" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="160" y="262" width="200" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="366" y="262" width="274" height="18" rx="4" fill="#145868" stroke="#0E3F4B"/>
+          <rect x="646" y="262" width="154" height="18" rx="4" fill="#145868" stroke="#0E3F4B"/>
+          <rect x="160" y="286" width="320" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="486" y="286" width="314" height="18" rx="4" fill="#145868" stroke="#0E3F4B"/>
+          <rect x="160" y="310" width="140" height="18" rx="4" fill="#FDEFE8"/>
+          <rect x="306" y="310" width="254" height="18" rx="4" fill="#145868" stroke="#0E3F4B"/>
+          <rect x="566" y="310" width="234" height="18" rx="4" fill="#145868" stroke="#0E3F4B"/>
+        </g>
+
+        <text class="p3aL" x="40" y="58">Static batching: the whole batch runs until its longest answer ends</text>
+        <text class="p3aS" x="93" y="140" text-anchor="middle">3 waiting</text>
+        <text class="p3aS" x="40" y="194">Hachure = a finished slot sitting idle. New arrivals cannot board until every answer in the batch is done.</text>
+        <text class="p3aL" x="40" y="218">Continuous batching: a freed slot takes the next request one step later</text>
+        <text class="p3aS" x="93" y="298" text-anchor="middle">no wait</text>
+        <text class="p3aB" x="40" y="354">Teal = a new request admitted into a freed slot. No idle gaps, and the queue drains as it fills.</text>
+
+        <text class="p3aN" x="30" y="380">Mechanism from Orca (Yu et al. 2022): iteration-level scheduling. Bar lengths illustrate, they are not measured.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - static batching leaves short answers' slots empty and the queue outside; continuous batching refills each slot the step after it frees</figcaption>
+    </figure>
+
+    <details class="card" open>
+      <summary><span class="mode live">Live</span>Why the step, not the batch, is the right unit<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Answers vary wildly in length. In Kiln's real rows a mean answer is 250 tokens, but some are a sentence and some are pages. Under static batching the cost of the batch is set by its longest member, so every short answer pays for the longest one in idle slots, and every new arrival pays for it in waiting time. Both show up in the place users feel: time to first token, because a request cannot start its prefill until it is admitted.</p>
+        <p>Continuous batching, also called iteration-level batching or in-flight batching, makes a scheduling decision after every decode step. A request that finished leaves; a request that is waiting joins, gets its prefill, and decodes alongside the others from the next step on. The GPU stays as full as memory allows, and a new request waits for one step rather than for the slowest stranger in the batch.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Orca named it, and the jump was large against its baseline.</strong> Yu et al. (2022), "Orca: A Distributed Serving System for Transformer-Based Generative Models" (OSDI 2022), proposed "iteration-level scheduling" plus "selective batching" (batching only the operations that can be batched across requests of different lengths). On GPT-3 175B they report a "36.9x throughput improvement at the same level of latency" against NVIDIA FasterTransformer, the serving system of that time. Read the multiplier as Orca against FasterTransformer in 2022, not as what continuous batching adds to a modern engine that already has it.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Who does it today, and what they call it<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Continuous batching is now the default in every serious serving engine, which is why you rarely see it as a switch. vLLM schedules at the step level by design. Hugging Face's Text Generation Inference lists "Continuous batching of incoming requests" among its features, and its docs now say "text-generation-inference is now in maintenance mode", recommending vLLM and SGLang instead. NVIDIA's TensorRT-LLM calls the same idea "In-flight batching". Three names, one mechanism.</p>
+        <p>The practical lesson: if you rent a managed endpoint or run one of these engines, you already have continuous batching. Where static batching still bites is in hand-rolled serving code that loops over a fixed batch, and in offline jobs where nobody checked. The build-along lets you switch it back on to see what it costs.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-2">
+    <div class="section-kicker">
+      <span class="klabel">Part 2 · covers throughput against the tail</span>
+      <h2>More riders per trip, a longer wait at the stop</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">Session 1 showed that one decode step reads all the weights once (<a href="01-where-the-money-goes.html#part-2">what each job waits on</a>). With a batch, that one read produces one token for every request in the batch, so tokens per second rise with batch size almost for free. The price is paid elsewhere. Every new arrival needs a prefill, and that prefill interrupts the decode steps of everyone already running. As load rises the batch grows, steps get slower, the queue grows, and the p95 time to first token climbs, slowly at first and then all at once.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 384" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Modelled p95 time to first token against load on one L4 serving Llama 3.1 8B with FP8 weights, continuous batching and paged KV. At 0.25 requests per second the p95 is 656 milliseconds with a mean batch of 3.8 and 70 tokens per second; at 0.5, 772 milliseconds, batch 9.0, 139 tokens per second; at 0.75, 957 milliseconds, batch 17.0, 206 tokens per second, the highest load under the 1 second target; at 1, 1.25 seconds, batch 30.6, 271 tokens per second; at 1.25, 53.3 seconds, batch 46.7, 313 tokens per second, past saturation.">
+        <defs>
+          <filter id="p3bSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="37" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p3bHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p3bAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p3bH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p3bL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p3bS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p3bB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p3bV { font: 800 16px Inter, sans-serif; fill: #7A1A04; }
+          .p3bW { font: 800 12px Inter, sans-serif; fill: #FFFFFF; }
+          .p3bN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p3bH" x="30" y="26">P95 TIME TO FIRST TOKEN AS LOAD RISES: ONE L4, LLAMA 3.1 8B, FP8 WEIGHTS</text>
+
+        <g filter="url(#p3bSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M110 70 L110 270 L820 270"/>
+          <rect x="150" y="183" width="80" height="87" rx="4" transform="rotate(-0.4 190 226)" fill="#FDEFE8"/>
+          <rect x="290" y="167" width="80" height="103" rx="4" transform="rotate(0.4 330 218)" fill="#FDEFE8"/>
+          <rect x="430" y="142" width="80" height="128" rx="4" transform="rotate(-0.4 470 206)" fill="#145868" stroke="#0E3F4B"/>
+          <rect x="570" y="103" width="80" height="167" rx="4" transform="rotate(0.4 610 186)" fill="#FFFFFF"/>
+          <rect x="710" y="70" width="80" height="200" rx="4" transform="rotate(-0.4 750 170)" fill="url(#p3bHc)"/>
+          <path d="M704 114 L796 100 M704 124 L796 110"/>
+          <path d="M110 137 L820 137" stroke="#B82500" stroke-width="2.4" stroke-dasharray="6 6"/>
+        </g>
+
+        <text class="p3bS" x="100" y="74" text-anchor="end">1.5 s</text>
+        <text class="p3bS" x="100" y="274" text-anchor="end">0</text>
+        <text class="p3bB" x="114" y="129">1 s target</text>
+
+        <text class="p3bV" x="190" y="174" text-anchor="middle">656 ms</text>
+        <text class="p3bV" x="330" y="158" text-anchor="middle">772 ms</text>
+        <text class="p3bW" x="470" y="168" text-anchor="middle">957 ms</text>
+        <text class="p3bV" x="610" y="95" text-anchor="middle">1.25 s</text>
+        <text class="p3bV" x="750" y="62" text-anchor="middle">53.3 s</text>
+
+        <text class="p3bL" x="190" y="290" text-anchor="middle">0.25 req/s</text>
+        <text class="p3bL" x="330" y="290" text-anchor="middle">0.5 req/s</text>
+        <text class="p3bB" x="470" y="290" text-anchor="middle">0.75 req/s</text>
+        <text class="p3bL" x="610" y="290" text-anchor="middle">1 req/s</text>
+        <text class="p3bL" x="750" y="290" text-anchor="middle">1.25 req/s</text>
+        <text class="p3bS" x="190" y="306" text-anchor="middle">batch 3.8</text>
+        <text class="p3bS" x="330" y="306" text-anchor="middle">batch 9.0</text>
+        <text class="p3bS" x="470" y="306" text-anchor="middle">batch 17.0</text>
+        <text class="p3bS" x="610" y="306" text-anchor="middle">batch 30.6</text>
+        <text class="p3bS" x="750" y="306" text-anchor="middle">batch 46.7</text>
+        <text class="p3bS" x="190" y="322" text-anchor="middle">70 tok/s</text>
+        <text class="p3bS" x="330" y="322" text-anchor="middle">139 tok/s</text>
+        <text class="p3bS" x="470" y="322" text-anchor="middle">206 tok/s</text>
+        <text class="p3bS" x="610" y="322" text-anchor="middle">271 tok/s</text>
+        <text class="p3bS" x="750" y="322" text-anchor="middle">313 tok/s</text>
+
+        <text class="p3bN" x="30" y="350">The last bar is broken off the scale: past saturation the queue grows without bound.</text>
+        <text class="p3bN" x="30" y="368">Modelled: BF16 KV, continuous batching, paged KV, 1,000 seeded requests with Kiln's real lengths per load.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - throughput keeps climbing while the tail creeps, then the tail jumps; the knee sits between 0.75 and 1 request a second</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Read the five loads like Maya would<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>All modelled, one L4, Kiln's request mix. At 0.25 requests a second the mean batch is 3.8 and the GPU puts out 70 tokens a second; the p95 first token is 656 ms. Triple the load to 0.75 and the mean batch grows to 17.0 and throughput to 206 tok/s, while p95 only moves to 957 ms. That is batching paying off: more work from the same weight reads, at a small cost in the tail.</p>
+        <p>Then the knee. At 1 request a second, p95 is 1.25 s and Kiln's 1 second target is missed, although the GPU is still producing more tokens (271 tok/s, batch 30.6). At 1.25 requests a second arrivals outpace what the GPU can finish, the queue never empties, and p95 is 53.3 s. Throughput is still rising (313 tok/s) at the very moment the service becomes unusable. That is why a throughput chart on its own is the wrong chart for capacity: the tail decides, and Learn Agent Launch treats that p95 as a service level you own (<a href="https://phoebefu6.github.io/learn-agent-launch-with-phoebe/courses/b3-operational-metrics.html">operational metrics ↗</a>).</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Sarathi-Serve attacked exactly this interruption.</strong> Agrawal et al. (2024), "Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve", split long prefills into chunks ("chunked-prefills") and fit them between decode steps so running requests are not stalled ("stall-free scheduling"). Against vLLM they report 2.6x serving capacity for Mistral-7B on one A100, up to 3.7x for Yi-34B on two A100s and up to 5.6x for Falcon-180B. The idea won: vLLM's docs now say chunked prefill is "enabled by default whenever possible" in its V1 engine.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Chunked prefill: stop one long prompt freezing everyone<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>In plain continuous batching a new request's whole prefill runs in one go, and every decode step behind it waits. Kiln's prompts carry a 1,200-token system prompt, so each arrival is a sizeable prefill. Chunked prefill cuts that prefill into pieces and runs one piece per step alongside the decode work, so time per output token for running users stays steady and the GPU's arithmetic, idle during decode, gets used.</p>
+        <p>The capacity model in the build-along does not chunk prefills. It treats each prefill as one block, which is one reason to read its tail numbers as a model of the mechanism, not a forecast for your engine. Session 5 removes most of the prefill another way, by reusing the system prompt's KV.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Disaggregation: prefill and decode on different GPUs<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>If prefill is arithmetic-bound and decode is bandwidth-bound, why make them share a GPU at all? Zhong et al. (2024), "DistServe" (OSDI 2024), run prefill on one set of GPUs and decode on another and hand the KV cache across. They report serving "7.4x more requests or 12.6x tighter SLO" against the systems they compare with. It is the right tool when you run many GPUs and have very different first-token and per-token targets; on one rented L4 there is nothing to split.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Every multiplier has its own baseline<span class="mini">2 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Orca 36.9x against FasterTransformer. Sarathi-Serve 2.6x to 5.6x against vLLM. DistServe 7.4x more requests against its comparison systems. PagedAttention, in session 4, 2-4x against FasterTransformer and Orca. Each paper picked its model, its hardware, its traffic and the best system of its time as the baseline. None of them multiplies with the others, and none of them tells you what your engine will gain, because your engine already includes most of the earlier ideas. The honest use of a multiplier is to know which mechanism matters, then measure on your own traffic.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-3">
+    <div class="section-kicker">
+      <span class="klabel">Part 3 · covers utilisation and the flat line</span>
+      <h2>The GPU bills by the hour, busy or not</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">An API charges per token, so an idle hour costs nothing. A rented GPU is a flat line: $584 a month for one L4 at Hugging Face Endpoints' list price ($0.80 an hour for 730 hours, read 2026-11-08), whether it serves a million requests or none. Learn Fine-tuning and Small Language Models compared those two lines and assumed the L4 was fully usable (<a href="https://phoebefu6.github.io/learn-fine-tuning-slm-with-phoebe/courses/06-the-break-even-bench.html">the break-even bench ↗</a>). This Part asks the question that assumption skips: how much can that L4 actually serve at Kiln's 1 second target, and what does each request cost at that load?</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 316" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Modelled cost per 1,000 requests at the highest load each GPU serves within a 1 second p95 first-token target, Llama 3.1 8B. L4 with BF16 weights, 584 dollars a month, 0.25 requests per second: 0.89 dollars. L4 with FP8 weights, 584 dollars a month, 0.75 requests per second: 0.30 dollars. A100 BF16, 1,825 dollars a month, 4 requests per second: 0.17 dollars. H100 BF16, 3,285 dollars a month, 12 requests per second: 0.10 dollars.">
+        <defs>
+          <filter id="p3cSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="41" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p3cHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p3cAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p3cH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p3cL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p3cS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p3cB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p3cV { font: 800 16px Inter, sans-serif; fill: #7A1A04; }
+          .p3cN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p3cH" x="30" y="26">COST PER 1,000 REQUESTS WITH EACH GPU AS FULL AS THE 1 S TARGET ALLOWS</text>
+
+        <g filter="url(#p3cSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M240 50 L240 254"/>
+          <rect x="240" y="56" width="445" height="34" rx="5" transform="rotate(-0.3 462 73)" fill="#FDEFE8"/>
+          <rect x="240" y="108" width="150" height="34" rx="5" transform="rotate(0.4 315 125)" fill="#145868" stroke="#0E3F4B"/>
+          <rect x="240" y="160" width="85" height="34" rx="5" transform="rotate(-0.4 282 177)" fill="#FDEFE8"/>
+          <rect x="240" y="212" width="50" height="34" rx="5" transform="rotate(0.4 265 229)" fill="#FDEFE8"/>
+        </g>
+
+        <text class="p3cL" x="226" y="71" text-anchor="end">L4, BF16 weights</text>
+        <text class="p3cS" x="226" y="86" text-anchor="end">$584 a month, 0.25 req/s</text>
+        <text class="p3cB" x="226" y="123" text-anchor="end">L4, FP8 weights (Kiln)</text>
+        <text class="p3cS" x="226" y="138" text-anchor="end">$584 a month, 0.75 req/s</text>
+        <text class="p3cL" x="226" y="175" text-anchor="end">A100, BF16</text>
+        <text class="p3cS" x="226" y="190" text-anchor="end">$1,825 a month, 4 req/s</text>
+        <text class="p3cL" x="226" y="227" text-anchor="end">H100, BF16</text>
+        <text class="p3cS" x="226" y="242" text-anchor="end">$3,285 a month, 12 req/s</text>
+
+        <text class="p3cV" x="697" y="79">$0.89 per 1,000</text>
+        <text class="p3cV" x="402" y="131">$0.30 per 1,000</text>
+        <text class="p3cV" x="337" y="183">$0.17 per 1,000</text>
+        <text class="p3cV" x="302" y="235">$0.10 per 1,000</text>
+
+        <text class="p3cN" x="30" y="280">Modelled, Llama 3.1 8B. GPU-month = 730 h at HF Endpoints list prices ($0.80, $2.50, $4.50 an hour), read 2026-11-08.</text>
+        <text class="p3cN" x="30" y="298">Each price per request holds only while the GPU runs at that load. Idle hours are billed the same.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the most expensive card is the cheapest per request, but only if you can keep it that full</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Turn a monthly price into a cost per request<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>The rule is one division: the hourly price over the requests served in that hour. The hard part is the denominator, which is not "as many as the GPU can push" but "as many as it can push while the tail meets the target". On the L4 with FP8 weights the capacity model's sweep says 0.75 requests a second, which puts the cost at $0.30 per 1,000 requests ($1.08 per million output tokens). The same L4 with BF16 weights carries only 0.25 requests a second at the target, so the same $584 buys $0.89 per 1,000. Session 4 explains why the weight format triples the load.</p>
+        <p>Bigger cards look worse on the monthly line and better per request. The A100 serves 4 requests a second at the target for $0.17 per 1,000; the H100 serves 12 for $0.10. All modelled. The catch is in the last line of the figure: $0.10 is only true if Kiln actually sends the H100 12 requests a second, around the clock. Session 6 shows what happens to Kiln's bill when the small side's traffic is far below that.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Even the price of the flat line disagrees with itself.</strong> On 2026-11-08 Hugging Face's pricing page listed an H100 80GB endpoint on AWS at $4.50 an hour, while its Inference Endpoints docs page listed the H100 on GCP only, at $10 an hour. Both are Hugging Face's own pages. The capacity widget uses $4.50 and says when it was read. At $10 an hour (our arithmetic: more than twice $4.50) the H100's cost per request would more than double, and the comparison with the A100 would change. Before you sign, read the price on the page you will actually be billed from.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Static batching on the same L4: no load is fast enough<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Keep everything else fixed (L4, FP8 weights, Kiln's mix) and switch to static batching with each slot reserving 4,096 tokens of KV. The capacity model prints a p95 first-token time of 30.5 s at 0.25 requests a second and 48.4 s at 0.5. No load in the sweep meets 1 second. The GPU and its price are the same; what changed is how the work is scheduled, and the flat line now buys nothing usable.</p>
+        <p>Reserved KV on its own, with continuous batching kept on, is less dramatic but still costly: the L4 holds 22 concurrent requests instead of 57, p95 at 0.75 requests a second is 11.1 s, and the highest load meeting the target drops to 0.5, $0.44 per 1,000. That memory story is session 4's.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="demo-1">
+    <div class="section-kicker">
+      <span class="klabel">Build-along</span>
+      <h2>Find Kiln's max load at the 1 s target</h2>
+      <span class="tag demo">★ 22 min · everyone builds</span>
+    </div>
+    <p class="lede">Constructed Kiln example, real request mix. The capacity widget models one rented GPU serving Llama 3.1 8B to a seeded queue of 1,000 requests with the prompt and answer lengths of Kiln's real rows. It is modelled, not measured: a roofline for each step plus a queue. As a sanity check, vLLM's 2024 performance post reports Llama 3 8B at "1 token every 13 ms under light load", while this model says 8.1 ms on an H100, so read every number here as optimistic. Note too that the quality numbers in session 2 come from GPT-4 against Mixtral 8x7B, while this capacity model serves Llama 3.1 8B: two different small models, so treat the pairing as a shape to re-measure.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 304" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="How the load sweep finds Kiln's capacity line. It tries 20 loads; at each load it simulates 1,000 seeded requests with Kiln's real lengths; it records the p95 time to first token per load; it picks the highest load under 1 second, 0.75 requests per second on an L4 with FP8 weights; and it divides the hourly price by the requests per hour. At 0.75 requests per second that is 2,700 requests an hour, and 0.80 dollars over 2,700 times 1,000 is 0.30 dollars per 1,000 requests.">
+        <defs>
+          <filter id="p3dSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="43" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p3dHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p3dAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p3dH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p3dL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p3dS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p3dW { font: 800 12px Inter, sans-serif; fill: #FFFFFF; }
+          .p3dN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p3dH" x="30" y="26">THE LOAD SWEEP: FROM AN HOURLY PRICE TO A COST PER 1,000 REQUESTS</text>
+
+        <g filter="url(#p3dSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="30" y="70" width="150" height="90" rx="10" transform="rotate(-0.6 105 115)" fill="#FFFFFF"/>
+          <rect x="202" y="70" width="150" height="90" rx="10" transform="rotate(0.5 277 115)" fill="url(#p3dHc)"/>
+          <rect x="374" y="70" width="150" height="90" rx="10" transform="rotate(-0.5 449 115)" fill="#FDEFE8"/>
+          <rect x="546" y="70" width="150" height="90" rx="10" transform="rotate(0.6 621 115)" fill="#145868" stroke="#0E3F4B"/>
+          <rect x="718" y="70" width="150" height="90" rx="10" transform="rotate(-0.4 793 115)" fill="#FFFFFF"/>
+          <path d="M184 115 L198 115" marker-end="url(#p3dAr)"/>
+          <path d="M356 115 L370 115" marker-end="url(#p3dAr)"/>
+          <path d="M528 115 L542 115" marker-end="url(#p3dAr)"/>
+          <path d="M700 115 L714 115" marker-end="url(#p3dAr)"/>
+          <rect x="30" y="190" width="838" height="64" rx="10" transform="rotate(0.2 449 222)" fill="#FFF1E0"/>
+        </g>
+
+        <text class="p3dL" x="44" y="100">20 loads</text>
+        <text class="p3dS" x="44" y="120">0.25 to 32 req/s,</text>
+        <text class="p3dS" x="44" y="136">one run each</text>
+        <text class="p3dL" x="216" y="100">1,000 requests</text>
+        <text class="p3dS" x="216" y="120">seeded arrivals,</text>
+        <text class="p3dS" x="216" y="136">Kiln's real lengths</text>
+        <text class="p3dL" x="388" y="100">p95 per load</text>
+        <text class="p3dS" x="388" y="120">time to first token:</text>
+        <text class="p3dS" x="388" y="136">queue plus prefill</text>
+        <text class="p3dW" x="560" y="106">highest under 1 s</text>
+        <text class="p3dW" x="560" y="128">0.75 req/s</text>
+        <text class="p3dL" x="732" y="100">$ per 1,000</text>
+        <text class="p3dS" x="732" y="120">$/h divided by</text>
+        <text class="p3dS" x="732" y="136">requests per hour</text>
+
+        <text class="p3dL" x="46" y="216">L4, FP8: 0.75 req/s is 2,700 requests an hour (our arithmetic); $0.80 / 2,700 x 1,000 = $0.30 per 1,000.</text>
+        <text class="p3dS" x="46" y="238">At 1 req/s the p95 is 1.25 s, so 1 is not allowed, even though the GPU could push more tokens.</text>
+
+        <text class="p3dN" x="30" y="282">Modelled. The queue is seeded, so everyone in the room sees the same numbers.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - capacity is the highest load whose tail still meets the target, and the price per request follows from it</figcaption>
+    </figure>
+
+    <div class="inf-widget" data-part="capacity" data-w="fp8" data-lam="0.75"></div>
+
+    <div class="steps">
+      <div class="step">
+        <p><strong>Start where Maya would: one L4, the small model at FP8.</strong> The widget opens on L4, Llama 3.1 8B, FP8 weights, BF16 KV cache, continuous batching, paged KV, prefix cache off, load 0.75. Read the verdict line and the two tiles under it.</p>
+        <div class="prompt-box good"><span class="label">★ Step 1 · 0.75 requests a second</span>Meets the 1 s p95 first-token target at 0.75 requests/s: p95 957 ms
+Output throughput: 206 tok/s   (mean batch 17.0)
+Concurrent requests: 57        (paged KV)</div>
+      </div>
+      <div class="step">
+        <p><strong>Push the load to 1.</strong> One step up the list and the verdict flips. Throughput still rises; the tail does not care.</p>
+        <div class="prompt-box good"><span class="label">★ Step 2 · 1 request a second</span>Misses the 1 s p95 first-token target at 1 requests/s: p95 1.25 s
+Output throughput: 271 tok/s   (mean batch 30.6)</div>
+      </div>
+      <div class="step">
+        <p><strong>Press "Run the load sweep".</strong> The widget runs all 20 loads, draws p95 against load with the 1 s line, circles the highest load under it and prices it.</p>
+        <div class="prompt-box good"><span class="label">★ Step 3 · the sweep on L4 FP8</span>Max load meeting the target:  0.75 req/s
+Cost per 1,000 requests:      $0.30    ($0.80/h at that load)
+Cost per 1M output tokens:    $1.08    (206 tok/s)
+One GPU for a month:          $584     (730 hours, busy or idle)</div>
+      </div>
+      <div class="step">
+        <p><strong>Break it on purpose: switch Batching to Static and KV memory to Reserved.</strong> Set the load to 0.25 and read the verdict, then run the sweep again.</p>
+        <div class="prompt-box good"><span class="label">★ Step 4 · static batching, reserved KV</span>Misses the 1 s p95 first-token target at 0.25 requests/s: p95 30.5 s
+Sweep: Max load meeting the target: none
+Same GPU, same $584. Only the scheduling changed.</div>
+      </div>
+      <div class="step">
+        <p><strong>Switch back to Continuous and Paged, then change Weights to BF16.</strong> Run the sweep. The load you can carry drops from 0.75 to 0.25; session 4 explains why.</p>
+        <div class="prompt-box good"><span class="label">★ Step 5 · L4 with BF16 weights</span>Max load meeting the target:  0.25 req/s
+Cost per 1,000 requests:      $0.89
+Cost per 1M output tokens:    $3.20</div>
+      </div>
+      <div class="step">
+        <p><strong>Change the GPU to H100, weights still BF16, and sweep.</strong> The monthly line rises; the cost per request falls, as long as the traffic is there.</p>
+        <div class="prompt-box good"><span class="label">★ Step 6 · H100 with BF16 weights</span>Max load meeting the target:  12 req/s
+Cost per 1,000 requests:      $0.10
+Cost per 1M output tokens:    $0.41
+One GPU for a month:          $3,285</div>
+      </div>
+      <div class="step">
+        <p><strong>Write Kiln's capacity line.</strong> One sentence Maya can put in front of Theo, with the condition that makes it true.</p>
+        <div class="prompt-box good"><span class="label">★ Step 7 · Kiln's capacity line</span>One L4 ($584 a month), Llama 3.1 8B at FP8, continuous batching, paged KV:
+  carries 0.75 requests/s at a p95 first token of 957 ms (modelled),
+  $0.30 per 1,000 requests WHEN it runs at that load.
+Below that load the month costs the same and each request costs more.
+Above it, the tail breaks the 1 s target: add a GPU, not more traffic.</div>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <p><strong>Your numbers will differ.</strong> The model is optimistic against measured engines and ignores chunked prefill, preemption and real kernel speeds. Use it to find the shape (where the knee sits, which setting moves it), then load-test your own engine with your own prompt and answer lengths at your own target before you sign for a GPU.</p>
+    </div>
+  </section>
+
+  <section class="section" id="exercise">
+    <div class="section-kicker">
+      <span class="klabel">Homework</span>
+      <h2>Before session 4</h2>
+      <span class="tag exercise">30 min</span>
+    </div>
+    <ol>
+      <li><strong>Write down your own target</strong>: the p95 time to first token your product can live with, and where it came from. If nobody has set one, that is the first finding.</li>
+      <li><strong>Find your peak hour</strong> in a week of logs: requests per second at the busiest hour and at the quietest. The gap between them is how empty a flat-priced GPU would sit.</li>
+      <li><strong>Check your serving engine's batching</strong>: confirm it schedules per step (continuous or in-flight batching) and whether chunked prefill is on. Note the engine and version.</li>
+      <li><strong>Re-run the build-along sweep on an A100</strong> with BF16 weights and compare its cost per 1,000 requests with the L4 FP8 line. Write one sentence on what traffic level would make the bigger card the right choice for you.</li>
+    </ol>
+  </section>
+
+  <section class="section" id="quiz">
+    <div class="section-kicker">
+      <span class="klabel">Check yourself</span>
+      <h2>Three questions</h2>
+    </div>
+    <p>Clear all three and session 3 gets stamped in your passport.</p>
+
+    <div class="quiz-q" data-answer="2">
+      <p class="qtext">1 · Why does continuous batching help the tail of time to first token so much compared with static batching?</p>
+      <button class="qopt" type="button">A · It makes each decode step faster by using less memory</button>
+      <button class="qopt" type="button">B · It skips the prefill for short prompts</button>
+      <button class="qopt" type="button">C · A new request is admitted the step after a slot frees, instead of waiting for the longest answer in the batch</button>
+      <button class="qopt" type="button">D · It runs fewer requests at once, so each one is quicker</button>
+      <p class="qwhy">Under static batching a new arrival waits outside until the whole batch, including its longest answer, is finished. Continuous batching decides after every decode step, so the wait is roughly one step. In the build-along the same L4 goes from 30.5 s p95 (static, reserved) to 656 ms at 0.25 requests a second.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="0">
+      <p class="qtext">2 · Why does throughput rise as the batch grows on the same GPU?</p>
+      <button class="qopt" type="button">A · Each decode step reads the weights once, and that one read produces a token for every request in the batch</button>
+      <button class="qopt" type="button">B · Bigger batches get a higher clock speed from the GPU</button>
+      <button class="qopt" type="button">C · Batching shortens each answer</button>
+      <button class="qopt" type="button">D · The prompt is prefilled only once for the whole batch</button>
+      <p class="qwhy">Decode waits on memory bandwidth, not arithmetic. Sharing one weight read across a mean batch of 17.0 instead of 3.8 is close to free, which is why the modelled L4 goes from 70 tok/s at a mean batch of 3.8 to 206 tok/s at 17.0. Each request's own KV still has to be read, so it is not entirely free.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="3">
+      <p class="qtext">3 · The sweep prints $0.30 per 1,000 requests for an L4 with FP8 weights. When is that number wrong?</p>
+      <button class="qopt" type="button">A · When the prompts are shorter than average</button>
+      <button class="qopt" type="button">B · Never: the price per request is fixed by the GPU</button>
+      <button class="qopt" type="button">C · Only when the GPU is overloaded</button>
+      <button class="qopt" type="button">D · Whenever the GPU is not running at 0.75 requests a second, because the $584 month is billed whether it is busy or not</button>
+      <p class="qwhy">$0.30 is the hourly price divided by the requests served in that hour at 0.75 requests a second. At lower traffic the same month is spread over fewer requests, so each costs more; at higher traffic the 1 s target breaks. Only a full GPU earns its per-request price.</p>
+    </div>
+
+    <p class="quiz-score"></p>
+  </section>
+
+  <section class="section" id="official">
+    <div class="section-kicker">
+      <span class="klabel">Sources covered</span>
+      <h2>What this session teaches, and where it came from</h2>
+    </div>
+    <div class="covered">
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Yu et al. 2022, Orca, OSDI 2022</span><span class="note">Iteration-level scheduling and selective batching; "36.9x throughput improvement at the same level of latency" against FasterTransformer on GPT-3 175B; read at source</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Agrawal et al. 2024, Sarathi-Serve</span><span class="note">Chunked prefills and stall-free scheduling; 2.6x serving capacity for Mistral-7B on one A100 against vLLM, up to 3.7x and 5.6x on larger models</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Zhong et al. 2024, DistServe, OSDI 2024</span><span class="note">Prefill and decode on different GPUs; "7.4x more requests or 12.6x tighter SLO" against its comparison systems</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">vLLM docs; vLLM v0.6.0 performance post (2024)</span><span class="note">Chunked prefill "enabled by default whenever possible" in V1; "1 token every 13 ms under light load" as the sanity check on the capacity model</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Hugging Face TGI docs</span><span class="note">"Continuous batching of incoming requests"; "now in maintenance mode", with vLLM and SGLang recommended</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">NVIDIA TensorRT-LLM overview</span><span class="note">"In-flight batching", the same mechanism under another name</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Hugging Face Inference Endpoints pricing page and docs</span><span class="note">L4 $0.80, A100 $2.50, H100 $4.50 an hour on AWS; the docs page lists H100 on GCP at $10; read 2026-11-08, re-verify</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">NVIDIA L4, A100 and H100 spec sheets</span><span class="note">Memory size and bandwidth behind every modelled step time; read 2026-11-08</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">DeepLearning.AI, Efficiently Serving LLMs</span><span class="note">The "Batching" and "Continuous Batching" lessons share this session's core; videos and certificate stay with the official short course</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">The capacity model, Kiln, Maya, Theo and the 1 s target</span><span class="note">Constructed for teaching; every load, latency and cost per request is modelled with Kiln's real prompt and answer lengths, not measured</span></div>
+    </div>
+    <p class="mono" style="margin-top:14px">Every fact on this page, and its verification tier, is recorded in the course's source map.</p>
+  </section>
+
+  <section class="cheat" id="cheatsheet">
+    <h3>Session 3 cheat sheet <span>· pin this</span></h3>
+    <div class="grid-2">
+      <div class="cheat-item"><b>Schedule per step</b><span>Continuous batching admits a new request the step after a slot frees. Static waits for the longest answer.</span></div>
+      <div class="cheat-item"><b>Why batches pay</b><span>One decode step reads the weights once for the whole batch, so tokens per second rise with batch size.</span></div>
+      <div class="cheat-item"><b>The tail decides</b><span>Throughput keeps rising past the point where p95 time to first token breaks. Size on the tail, not the throughput.</span></div>
+      <div class="cheat-item"><b>Capacity line</b><span>The highest load whose p95 meets the target. Kiln on one L4 at FP8: 0.75 req/s, modelled.</span></div>
+      <div class="cheat-item"><b>Flat line to per request</b><span>Hourly price / requests per hour at that load. $0.30 per 1,000 is only true when the GPU is that full.</span></div>
+      <div class="cheat-item"><b>Multipliers</b><span>Orca 36.9x, Sarathi-Serve 2.6x, DistServe 7.4x: each against its own baseline, none adds to the others.</span></div>
+    </div>
+  </section>
+
+  <div class="callout next">
+    <span class="nx-pill">Next session</span>
+    <p>Step 5 left a question open: why does the same L4 carry three times the load when the weights are FP8 instead of BF16? Session 4 measures the KV cache in bytes per token, shows how weight and KV precision decide how many requests fit, and what the quality research says each precision costs.</p>
+  </div>
+
+  <footer class="pagefoot">
+    <span>Session 3 of 6 · learn-llm-inference-with-phoebe · by Phoebe Fu &nbsp;·&nbsp; 📚 <a href="https://phoebefu6.github.io/learn-with-phoebe/">Learn with Phoebe ↗</a></span>
+    <span><a href="02-routing.html">← Prev: Routing</a> &nbsp;·&nbsp; <a href="04-quantised-serving-and-kv-cache.html">Next: Quantised serving →</a></span>
+  </footer>
+
+</main>
+
+<script src="../assets/inf-sample.js?v=1"></script>
+<script src="../assets/inf-live.js?v=1"></script>
+<script src="../assets/inf-ui.js?v=3"></script>
+<script src="../assets/app.js?v=1"></script>
+</body>
+</html>

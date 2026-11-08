@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- social:start -->
+<meta name="description" content="Session 4 of 6. Every token a GPU is serving rents memory for its keys and values. KV bytes per token from the model's config, why PagedAttention lets one GPU hold more requests, what FP8 and INT4 weights and an FP8 KV cache buy in concurrency, what they may cost in quality, and Kiln's model and cache fitted onto one L4.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Learn with Phoebe">
+<meta property="og:title" content="Quantised serving and the KV cache - learn llm inference with phoebe">
+<meta property="og:description" content="Session 4 of 6. KV bytes per token, paged memory, smaller weights and their quality bill, and how many requests fit on one GPU.">
+<meta property="og:url" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/courses/04-quantised-serving-and-kv-cache.html">
+<meta property="og:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Quantised serving and the KV cache - learn llm inference with phoebe">
+<meta name="twitter:description" content="Session 4 of 6. Fit Kiln's model and its KV cache on one GPU, at BF16, FP8 and INT4, in your browser.">
+<meta name="twitter:image" content="https://phoebefu6.github.io/learn-llm-inference-with-phoebe/assets/og-cover.png">
+<!-- social:end -->
+<title>Session 4 · Quantised serving and the KV cache - learn llm inference with phoebe</title>
+<link rel="stylesheet" href="../assets/style.css?v=1">
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="wrap">
+    <span class="crumb"><a href="../index.html">learn-llm-inference-with-phoebe</a> / Session 4 of 6</span>
+    <button class="btn" id="toggle-all" type="button">Expand all</button>
+    <button class="btn primary" id="zoom-toggle" type="button">Projector zoom: off</button>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Learn LLM Inference and Model Serving with Phoebe · Session 4 of 6</div>
+    <h1>Quantised serving and <span class="accent">the KV cache</span></h1>
+    <p class="sub">A GPU does not run out of arithmetic first. It runs out of room. The weights take a fixed slab of memory, and every request in flight takes more on top, a few hundred kilobytes for every token it has read or written. Whatever is left after the weights decides how many requests one GPU can hold at once, and that number decides what each request costs. Tonight we measure the cache in bytes, see why paging it changed serving, shrink the weights and the cache, read the quality bill, and fit Kiln's model onto one L4.</p>
+    <div class="chip-row">
+      <span class="chip level">🟠 Deeper</span>
+      <span class="chip audience">Builders who own the bill</span>
+      <span class="chip audience">No GPU needed</span>
+      <span class="chip time">45 min</span>
+    </div>
+    <div class="agenda">
+      <span class="a1" style="flex:1">0-3 · Welcome</span>
+      <span class="a2" style="flex:4">3-18 · KV bytes, paging, precision</span>
+      <span class="a3" style="flex:5">18-40 · Build-along: fit Kiln on one GPU</span>
+      <span class="a4" style="flex:1">40-45 · Q&amp;A</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="section" id="intro">
+    <div class="section-kicker">
+      <span class="klabel">Part 0</span>
+      <h2>Where we start</h2>
+    </div>
+    <p class="lede">Constructed Kiln example. Session 3 left Maya with an awkward fact: one L4 running Llama 3.1 8B in BF16 meets Kiln's 1 s first-token target at only 0.25 requests a second, and the reason was not arithmetic. The GPU simply could not hold enough requests at once to batch them well. Theo's question is blunt: can the same GPU hold more without the answers getting worse? Tonight is about the memory behind that number. Kiln, Maya, Theo and every Kiln constant are invented for teaching; the prompt and answer lengths are the real RouteLLM rows, and every capacity number is a labelled model computed in your browser.</p>
+
+    <div class="legend">
+      <span class="pill">🎫 Clear all three quiz questions to stamp your passport</span>
+      <span class="pill">Live = presented in the 45 minutes</span>
+      <span class="pill">Self-study = the full depth, after class</span>
+      <span class="pill">★ Build-along = do it yourself</span>
+    </div>
+
+    <div class="callout win">
+      <p><strong>★ What you walk out with tonight.</strong> The KV-bytes-per-token formula and the habit of computing it from any model's config file, a picture of why paged KV memory lets one GPU hold more requests, a table of what FP8 and INT4 weights and an FP8 KV cache buy on an L4, an honest account of what they may cost in quality, and a one-line serving choice for Kiln with the eval it still owes.</p>
+    </div>
+  </section>
+
+  <section class="section" id="part-1">
+    <div class="section-kicker">
+      <span class="klabel">Part 1 · covers KV memory per token</span>
+      <h2>Every token rents memory</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">Session 1 described the KV cache in a paragraph: for every token a request has read or written, every layer keeps one key vector and one value vector so decode never re-reads the prompt. Now put a size on it. The formula needs four numbers from the model's config file and one from your chosen precision: KV bytes per token = 2 (key and value) x layers x KV heads x head dim x bytes per number.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 304" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="An L4's 24 gigabytes drawn as one bar. Llama 3.1 8B's BF16 weights take 16.1 gigabytes, a runtime reserve takes 1.5 gigabytes, 10 percent is held back, and the KV pool gets 4.0 gigabytes, which is 30,818 tokens at 128 kilobytes each, or 19 requests at Kiln's mean context of 1,588 tokens. The pool is shown cut into 19 per-request slices.">
+        <defs>
+          <filter id="p4aSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="41" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p4aHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p4aAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p4aH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p4aL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p4aS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p4aB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p4aN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p4aH" x="30" y="26">LLAMA 3.1 8B, BF16, ON ONE L4 (24 GB): WHERE THE MEMORY GOES</text>
+
+        <g filter="url(#p4aSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="70" width="537" height="60" rx="6" transform="rotate(-0.3 308 100)" fill="url(#p4aHc)"/>
+          <rect x="577" y="70" width="50" height="60" rx="4" fill="#FDEFE8"/>
+          <rect x="627" y="70" width="133" height="60" rx="4" fill="#145868"/>
+          <rect x="760" y="70" width="80" height="60" rx="4" fill="#FFFFFF" stroke-dasharray="4 5"/>
+          <path d="M646 76 L646 124 M665 76 L665 124 M684 76 L684 124 M703 76 L703 124 M722 76 L722 124 M741 76 L741 124" stroke="#FFFCFA" stroke-width="1.5"/>
+          <path d="M627 134 L440 192 M760 134 L838 192" stroke-dasharray="3 5"/>
+          <rect x="436" y="194" width="404" height="50" rx="6" transform="rotate(0.4 638 219)" fill="#FFFFFF"/>
+          <rect x="440" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="461" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="482" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="503" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="524" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="545" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="566" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="587" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="608" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="629" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="650" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="671" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="692" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="713" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="734" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="755" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="776" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="797" y="200" width="18" height="38" rx="2" fill="#145868"/>
+          <rect x="818" y="200" width="18" height="38" rx="2" fill="#145868"/>
+        </g>
+
+        <text class="p4aL" x="308" y="58" text-anchor="middle">weights 16.1 GB</text>
+        <text class="p4aL" x="602" y="58" text-anchor="middle">runtime 1.5 GB</text>
+        <text class="p4aS" x="840" y="58" text-anchor="end">10% held back</text>
+        <text class="p4aB" x="40" y="210">KV pool: 4.0 GB = 30,818 tokens</text>
+        <text class="p4aS" x="40" y="228">19 requests at Kiln's mean 1,588 tokens</text>
+        <text class="p4aS" x="638" y="262" text-anchor="middle">one slice = one request's keys and values</text>
+
+        <text class="p4aN" x="30" y="290">Modelled. KV per token = 2 x 32 layers x 8 KV heads x 128 dims x 2 bytes = 128 KB.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - the weights are fixed; what is left after them, divided by each request's cache, is how many requests one GPU can hold</figcaption>
+    </figure>
+
+    <details class="card" open>
+      <summary><span class="mode live">Live</span>Read the formula off a config file<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Llama 3.1 8B's published config.json (read from the unsloth mirror, because meta-llama's own copy is gated) lists 32 layers, 8 key-value heads and a head dimension of 128. In BF16 each number is 2 bytes. So one token costs 2 x 32 x 8 x 128 x 2 = 131,072 bytes, which is 128 KB. Llama 3.1 70B, with 80 layers and the same 8 KV heads, comes to 320 KB. Qwen2.5 7B, with 28 layers and only 4 KV heads, comes to 56 KB (all three computed from their configs).</p>
+        <p>Multiply by context length and by requests in flight and the cache becomes the thing that fills the GPU. On an L4, 90 percent of 24 GB is usable in the bench, 21.6 GB. The BF16 weights take 16.1 GB, the runtime holds back 1.5 GB, and the KV pool gets 4.0 GB: 30,818 tokens, or 19 requests at Kiln's mean 1,588 tokens of prompt plus answer (modelled; the widget prints each of these). vLLM's own <code>--gpu-memory-utilization</code> default is now 0.92; the bench rounds down to 90 percent.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>The PagedAttention paper did the same sum.</strong> Kwon et al. (2023) work it for OPT-13B: one token's KV state is "2 x 5120 x 40 x 2" bytes, 800 KB, and a single 2,048-token request "can be as much as 1.6 GB". On an A100 40GB serving that 13B model, about 65 percent of memory goes to weights and close to 30 percent to the KV cache. Same arithmetic as Kiln's figure above, a bigger model and a bigger GPU.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Why Llama's cache is small: shared KV heads<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Llama 3.1 8B has 32 attention heads for queries but only 8 KV heads: groups of query heads share one key and one value. The formula only counts KV heads, so the cache is a quarter of what 32 full heads would cost. Pope et al. (2022) took the idea to its limit with multiquery attention, one shared KV head, and report it enables scaling to "32x larger context lengths". Qwen2.5 7B shares even harder, 28 query heads on 4 KV heads, which is why its 56 KB per token is under half of Llama's 128 KB.</p>
+        <p>The habit to keep: before you pick a model for a long-context feature, open its config file and compute this number. Two models of the same parameter count can hold very different numbers of requests on the same GPU.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-2">
+    <div class="section-kicker">
+      <span class="klabel">Part 2 · covers PagedAttention</span>
+      <h2>Reserve what you use, not what you might</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">A serving engine does not know how long an answer will be when the request arrives. The simple fix is to reserve the maximum for every request up front: a contiguous slot big enough for the longest sequence allowed. Most answers end long before the slot is full, so most of that reservation sits empty, and the GPU turns away requests it has room for. Paging fixes it the way an operating system does: hand out memory in small fixed blocks as each request's tokens arrive.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 312" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The same 92,084-token KV pool for Llama 3.1 8B with FP8 weights on an L4, carved two ways. On the left, reserved slots of 4,096 tokens each: three slots shown, each mostly empty after the tokens actually used, and 22 requests fit. On the right, the pool is a grid of small blocks handed out to requests A to H as their tokens arrive, with a few free blocks left, and 57 requests fit.">
+        <defs>
+          <filter id="p4bSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="43" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p4bHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p4bAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p4bH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p4bL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p4bS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p4bW { font: 800 12px Inter, sans-serif; fill: #FFFFFF; }
+          .p4bV { font: 800 18px Inter, sans-serif; fill: #7A1A04; }
+          .p4bN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p4bH" x="30" y="26">THE SAME 92,084-TOKEN KV POOL, CARVED TWO WAYS (FP8 WEIGHTS, L4)</text>
+
+        <g filter="url(#p4bSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="30" y="40" width="390" height="230" rx="10" transform="rotate(-0.4 225 155)" fill="#FFFFFF"/>
+          <rect x="460" y="40" width="390" height="230" rx="10" transform="rotate(0.4 655 155)" fill="#FFFFFF"/>
+          <rect x="50" y="80" width="110" height="30" rx="4" fill="#FDEFE8"/>
+          <rect x="160" y="80" width="240" height="30" rx="4" fill="#FEF2F2" stroke="#FCA5A5" stroke-dasharray="4 4"/>
+          <rect x="50" y="124" width="170" height="30" rx="4" fill="#FDEFE8"/>
+          <rect x="220" y="124" width="180" height="30" rx="4" fill="#FEF2F2" stroke="#FCA5A5" stroke-dasharray="4 4"/>
+          <rect x="50" y="168" width="80" height="30" rx="4" fill="#FDEFE8"/>
+          <rect x="130" y="168" width="270" height="30" rx="4" fill="#FEF2F2" stroke="#FCA5A5" stroke-dasharray="4 4"/>
+
+          <rect x="482" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="517" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="552" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="587" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="622" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="657" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="692" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="727" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="762" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="797" y="78" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="482" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="517" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="552" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="587" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="622" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="657" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="692" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="727" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="762" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="797" y="108" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="482" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="517" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="552" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="587" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="622" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="657" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="692" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="727" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="762" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="797" y="138" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="482" y="168" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="517" y="168" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="552" y="168" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="587" y="168" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="622" y="168" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="657" y="168" width="30" height="24" rx="3" fill="#145868"/>
+          <rect x="692" y="168" width="30" height="24" rx="3" fill="#FFFFFF" stroke-dasharray="3 4"/>
+          <rect x="727" y="168" width="30" height="24" rx="3" fill="#FFFFFF" stroke-dasharray="3 4"/>
+          <rect x="762" y="168" width="30" height="24" rx="3" fill="#FFFFFF" stroke-dasharray="3 4"/>
+          <rect x="797" y="168" width="30" height="24" rx="3" fill="#FFFFFF" stroke-dasharray="3 4"/>
+        </g>
+
+        <text class="p4bL" x="50" y="64">Reserved: 4,096 tokens per slot</text>
+        <text class="p4bL" x="480" y="64">Paged: blocks handed out as tokens arrive</text>
+
+        <text class="p4bS" x="58" y="99">A: in use</text>
+        <text class="p4bS" x="172" y="99">reserved, never used</text>
+        <text class="p4bS" x="58" y="143">B: in use</text>
+        <text class="p4bS" x="232" y="143">reserved, never used</text>
+        <text class="p4bS" x="58" y="187">C: in use</text>
+        <text class="p4bS" x="142" y="187">reserved, never used</text>
+
+        <text class="p4bW" x="497" y="95" text-anchor="middle">A</text>
+        <text class="p4bW" x="532" y="95" text-anchor="middle">B</text>
+        <text class="p4bW" x="567" y="95" text-anchor="middle">A</text>
+        <text class="p4bW" x="602" y="95" text-anchor="middle">C</text>
+        <text class="p4bW" x="637" y="95" text-anchor="middle">B</text>
+        <text class="p4bW" x="672" y="95" text-anchor="middle">D</text>
+        <text class="p4bW" x="707" y="95" text-anchor="middle">A</text>
+        <text class="p4bW" x="742" y="95" text-anchor="middle">E</text>
+        <text class="p4bW" x="777" y="95" text-anchor="middle">C</text>
+        <text class="p4bW" x="812" y="95" text-anchor="middle">F</text>
+        <text class="p4bW" x="497" y="125" text-anchor="middle">B</text>
+        <text class="p4bW" x="532" y="125" text-anchor="middle">D</text>
+        <text class="p4bW" x="567" y="125" text-anchor="middle">G</text>
+        <text class="p4bW" x="602" y="125" text-anchor="middle">A</text>
+        <text class="p4bW" x="637" y="125" text-anchor="middle">E</text>
+        <text class="p4bW" x="672" y="125" text-anchor="middle">H</text>
+        <text class="p4bW" x="707" y="125" text-anchor="middle">C</text>
+        <text class="p4bW" x="742" y="125" text-anchor="middle">F</text>
+        <text class="p4bW" x="777" y="125" text-anchor="middle">B</text>
+        <text class="p4bW" x="812" y="125" text-anchor="middle">G</text>
+        <text class="p4bW" x="497" y="155" text-anchor="middle">D</text>
+        <text class="p4bW" x="532" y="155" text-anchor="middle">A</text>
+        <text class="p4bW" x="567" y="155" text-anchor="middle">H</text>
+        <text class="p4bW" x="602" y="155" text-anchor="middle">E</text>
+        <text class="p4bW" x="637" y="155" text-anchor="middle">C</text>
+        <text class="p4bW" x="672" y="155" text-anchor="middle">G</text>
+        <text class="p4bW" x="707" y="155" text-anchor="middle">F</text>
+        <text class="p4bW" x="742" y="155" text-anchor="middle">B</text>
+        <text class="p4bW" x="777" y="155" text-anchor="middle">H</text>
+        <text class="p4bW" x="812" y="155" text-anchor="middle">D</text>
+        <text class="p4bW" x="497" y="185" text-anchor="middle">E</text>
+        <text class="p4bW" x="532" y="185" text-anchor="middle">A</text>
+        <text class="p4bW" x="567" y="185" text-anchor="middle">G</text>
+        <text class="p4bW" x="602" y="185" text-anchor="middle">H</text>
+        <text class="p4bW" x="637" y="185" text-anchor="middle">F</text>
+        <text class="p4bW" x="672" y="185" text-anchor="middle">C</text>
+        <text class="p4bS" x="760" y="210" text-anchor="middle">free blocks</text>
+
+        <text class="p4bV" x="50" y="236">22 requests</text>
+        <text class="p4bS" x="50" y="256">one 4,096-token slot each; the tails sit empty</text>
+        <text class="p4bV" x="480" y="236">57 requests</text>
+        <text class="p4bS" x="480" y="256">each request takes blocks only as it grows</text>
+
+        <text class="p4bN" x="30" y="296">Modelled, Llama 3.1 8B on an L4. Letters are illustrative; the two request counts are the widget's.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - same pool, same tokens; paging stops the empty tails from blocking new requests</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>What the paper found, in its own words<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Kwon et al. (2023), "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023), measured the systems that came before: they used "only 20.4% - 38.2% of the KV cache memory" to store actual token states. The rest was reserved space that never filled and gaps between reservations. Their fix stores each request's keys and values in fixed-size blocks that need not sit next to each other, the way virtual memory pages work, and reaches "near-zero waste in KV cache memory". With more requests in each batch, vLLM "improves the throughput of popular LLMs by 2-4x" against FasterTransformer and Orca.</p>
+        <p>Popular summaries of this paper often carry waste percentages that are not in its text. When you cite it, quote the 20.4% - 38.2% line and the 2-4x line, which are.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Paging went from paper to default.</strong> vLLM's own PagedAttention design page now describes itself as "a historical document": the idea is simply how the engine works. NVIDIA's TensorRT-LLM lists a "Paged KV cache with intelligent block reuse" among its features. And because memory now lives in blocks, a block of a shared prefix can be found and reused: vLLM's automatic prefix caching hashes each block by its tokens and the tokens before it. That reuse is session 5's lever.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Kiln's paging bench, modelled<span class="mini">4 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Hold everything else still: L4, Llama 3.1 8B with FP8 weights, continuous batching. The bench's reserved mode gives every request a 4,096-token slot; its paged mode reserves only each request's own final length. Same 92,084-token pool. Reserved holds 22 requests, paged holds 57. Run the load sweep and the highest load meeting Kiln's 1 s p95 first-token target is 0.5 requests a second reserved against 0.75 paged, which prices out at $0.44 against $0.30 per 1,000 requests (all modelled).</p>
+        <p>The bench's paged mode is kinder than it should be in one way and harsher in another. It knows each request's final length on admission, which a real engine does not, and it never preempts a request when memory runs short, which a real engine does. Treat the gap between 22 and 57 as the shape of the effect, not a forecast for your traffic.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="part-3">
+    <div class="section-kicker">
+      <span class="klabel">Part 3 · covers quantised weights and KV</span>
+      <h2>Smaller weights, more room, and a quality bill</h2>
+      <span class="tag concept">5 min live</span>
+    </div>
+    <p class="lede">Quantisation stores each number in fewer bytes: BF16 uses 2, FP8 and INT8 use 1, and INT4 weight-only uses half a byte while the arithmetic still runs in 16-bit. Smaller weights do two things at once on a decode-bound GPU. Each step has fewer bytes to stream, so it is faster, and the memory they free goes to the KV pool, so more requests fit. The cache itself can be stored in FP8 too, which halves the bytes per token. The price is paid in answer quality, and how big that price is depends on who you ask.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 304" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Llama 3.1 8B on one L4 at four settings. Weights in memory: BF16 16.1 gigabytes, FP8 8.0, INT4 weight-only 4.0, FP8 weights with FP8 KV cache 8.0. Concurrent requests at Kiln's mean context: 19, 57, 77 and 115. Max load at the 1 second target is 0.25 requests a second for BF16 and 0.75 for the other three.">
+        <defs>
+          <filter id="p4cSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="47" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p4cHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p4cAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p4cH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p4cL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p4cS { font: 400 11px Inter, sans-serif; fill: #6E4A3F; }
+          .p4cB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p4cV { font: 800 16px Inter, sans-serif; fill: #7A1A04; }
+          .p4cN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p4cH" x="30" y="26">LLAMA 3.1 8B ON ONE L4: WEIGHT BYTES AGAINST REQUESTS THAT FIT</text>
+
+        <g filter="url(#p4cSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="190" y="72" width="220" height="28" rx="4" transform="rotate(-0.4 300 86)" fill="url(#p4cHc)"/>
+          <rect x="190" y="117" width="109" height="28" rx="4" transform="rotate(0.4 245 131)" fill="url(#p4cHc)"/>
+          <rect x="190" y="162" width="55" height="28" rx="4" transform="rotate(-0.4 218 176)" fill="url(#p4cHc)"/>
+          <rect x="190" y="207" width="109" height="28" rx="4" transform="rotate(0.4 245 221)" fill="url(#p4cHc)"/>
+          <rect x="520" y="72" width="43" height="28" rx="4" transform="rotate(0.4 541 86)" fill="#145868"/>
+          <rect x="520" y="117" width="129" height="28" rx="4" transform="rotate(-0.4 584 131)" fill="#145868"/>
+          <rect x="520" y="162" width="174" height="28" rx="4" transform="rotate(0.4 607 176)" fill="#145868"/>
+          <rect x="520" y="207" width="260" height="28" rx="4" transform="rotate(-0.4 650 221)" fill="#145868"/>
+        </g>
+
+        <text class="p4cB" x="190" y="58">weights in memory</text>
+        <text class="p4cB" x="520" y="58">concurrent requests, paged</text>
+
+        <text class="p4cL" x="176" y="86" text-anchor="end">BF16</text>
+        <text class="p4cS" x="176" y="102" text-anchor="end">KV 128 KB / token</text>
+        <text class="p4cL" x="176" y="131" text-anchor="end">FP8</text>
+        <text class="p4cS" x="176" y="147" text-anchor="end">KV 128 KB / token</text>
+        <text class="p4cL" x="176" y="176" text-anchor="end">INT4 weight-only</text>
+        <text class="p4cS" x="176" y="192" text-anchor="end">KV 128 KB / token</text>
+        <text class="p4cL" x="176" y="221" text-anchor="end">FP8 + FP8 KV</text>
+        <text class="p4cS" x="176" y="237" text-anchor="end">KV 64 KB / token</text>
+
+        <text class="p4cV" x="420" y="92">16.1 GB</text>
+        <text class="p4cV" x="309" y="137">8.0 GB</text>
+        <text class="p4cV" x="255" y="182">4.0 GB</text>
+        <text class="p4cV" x="309" y="227">8.0 GB</text>
+        <text class="p4cV" x="573" y="92">19</text>
+        <text class="p4cV" x="659" y="137">57</text>
+        <text class="p4cV" x="704" y="182">77</text>
+        <text class="p4cV" x="790" y="227">115</text>
+
+        <text class="p4cN" x="30" y="268">Modelled. Max load at the 1 s target: BF16 0.25 req/s; FP8, INT4 and FP8 + FP8 KV all 0.75 req/s.</text>
+        <text class="p4cN" x="30" y="286">Past FP8, memory stops being the limit: prefill time and the queue are.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - halving the weights triples the requests that fit; after that, more room no longer buys more load at Kiln's target</figcaption>
+    </figure>
+
+    <details class="card">
+      <summary><span class="mode live">Live</span>Why INT4 and an FP8 cache stop paying at 0.75<span class="mini">4 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Read the bench's four L4 rows (all modelled). BF16: 16.1 GB of weights, 19 requests, 90.4 ms per token for one request alone, max load 0.25 requests a second at the 1 s target, $0.89 per 1,000 requests. FP8 weights: 8.0 GB, 57 requests, 45.8 ms, 0.75 requests a second, $0.30. INT4 weight-only: 4.0 GB, 77 requests, 23.5 ms, still 0.75, still $0.30. FP8 weights plus an FP8 KV cache at 64 KB per token: 115 requests, still 0.75.</p>
+        <p>The first step pays because BF16 was memory-starved: 19 requests cannot form a big enough batch. After FP8 the binding limit moves. Kiln's target is on time to first token, and every request still has to prefill its 1,200-token system prompt plus the question; INT4 weight-only still computes in 16-bit, so prefill does not get faster. At the next load the sweep tries, 1 request a second, the p95 is 1.25 s for FP8, 1.09 s for INT4 and 1.16 s for FP8 with an FP8 cache. All three miss the 1 s line. More room for requests does not help when the queue and prefill are what make the first token late. Session 5 attacks exactly that prefill.</p>
+        <p>The model is a roofline plus a seeded queue: it says 8.1 ms per token for this model alone on an H100, against the "1 token every 13 ms under light load" that vLLM's 2024 performance post reports. Read every capacity number here as optimistic.</p>
+      </div>
+    </details>
+
+    <div class="callout example">
+      <span class="ex-pill">Real world</span>
+      <p><strong>Teach the disagreement: how much quality does a smaller number cost?</strong> Kurtic et al. (2024), "'Give Me BF16 or Give Me Death'? Accuracy-Performance Trade-Offs in LLM Quantization" (ACL 2025), ran over 500,000 evaluations on the Llama-3.1 family and report that "FP8 (W8A8-FP) is effectively lossless across all model scales", that "well-tuned INT8 (W8A8-INT) achieves surprisingly low (1-3%) accuracy degradation", and that "INT4 weight-only (W4A16-INT) is more competitive than expected, rivaling 8-bit". NVIDIA's TensorRT-LLM says FP8 "can double performance and halve memory consumption compared to 16-bit". Practitioners still report task-specific drops that benchmark averages hide. Both can be true: an average across tasks can be flat while your one task falls. The working rule is the same either way: run your own eval at the precision you will serve.</p>
+    </div>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>How the 4-bit methods keep quality<span class="mini">4 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>Rounding every weight to 4 bits naively hurts. Two methods made weight-only 4-bit practical. GPTQ (Frantar et al., ICLR 2023) quantises one layer at a time and corrects the remaining weights for each rounding error; it quantised a 175B model "in approximately four GPU hours" to 3 or 4 bits. AWQ (Lin et al., MLSys 2024) observes that a few weights matter far more than the rest: "Protecting only 1% salient weights can greatly reduce quantization error".</p>
+        <p>Kurtic et al. also add a deployment twist: "W4A16 is the most cost-efficient for synchronous setups, while W8A8 dominates in asynchronous continuous batching". That matches the bench's shape. INT4 makes a lone request's decode fastest (23.5 ms against 45.8 ms), but under continuous batching at Kiln's target the two land on the same 0.75 requests a second.</p>
+        <p>Training-time 4-bit is a different job. The fine-tuning sessions work weights memory by hand (<a href="https://phoebefu6.github.io/learn-fine-tuning-slm-with-phoebe/courses/02-small-models-trade-offs.html">small models and their trade-offs ↗</a>) and use 4-bit base weights to train adapters cheaply (<a href="https://phoebefu6.github.io/learn-fine-tuning-slm-with-phoebe/courses/04-lora-and-qlora.html">LoRA and QLoRA ↗</a>). Here the question is only what you serve.</p>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary><span class="mode self">Self-study</span>Where the quantised formats come from<span class="mini">3 min</span><span class="caret">▶</span></summary>
+      <div class="body">
+        <p>vLLM's quantization docs list the formats it loads, each with its own tooling: AutoAWQ, BitsAndBytes, GPTQModel, LLM Compressor (FP8 W8A8, INT4 W4A16, INT8 W8A8), a quantized KV cache, TorchAO and GGUF among them. Check which formats your GPU generation supports before you pick one: the FP8 tensor-core path needs recent hardware, and the bench does not model FP8 arithmetic speedups at all, only the smaller bytes. DeepLearning.AI's "Quantization Fundamentals with Hugging Face" and "Quantization in Depth" short courses walk through the number formats by hand if you want the arithmetic underneath.</p>
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="demo-1">
+    <div class="section-kicker">
+      <span class="klabel">Build-along</span>
+      <h2>Fit Kiln's model and its cache on one GPU</h2>
+      <span class="tag demo">★ 22 min · everyone builds</span>
+    </div>
+    <p class="lede">Constructed Kiln example, real request lengths. The capacity widget takes a GPU, a model, a weight precision, a KV precision and a memory mode, does the fitting arithmetic, then runs a seeded queue of 1,000 requests with the real RouteLLM prompt and answer lengths plus Kiln's 1,200-token system prompt. Every capacity number it prints is modelled. Your job is to find the cheapest setting that meets Kiln's 1 s p95 first-token target, and to write down what it still owes in quality.</p>
+
+    <figure class="zoomable">
+      <svg viewBox="0 0 880 352" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The fitting arithmetic for Llama 3.1 8B on an L4, as five steps for BF16 weights and FP8 weights. Usable memory is 21.6 gigabytes in both. Minus weights of 16.1 or 8.0 gigabytes. Minus a 1.5 gigabyte runtime reserve. Divide what is left by 128 kilobytes per token: 30,818 or 92,084 tokens. Divide by Kiln's mean context of 1,588 tokens: 19 or 57 requests.">
+        <defs>
+          <filter id="p4dSk" x="-3%" y="-3%" width="106%" height="106%"><feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="2" seed="53" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/></filter>
+          <pattern id="p4dHc" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(-38)"><line x1="0" y1="0" x2="0" y2="7" stroke="#B82500" stroke-width="1" opacity=".5"/></pattern>
+          <marker id="p4dAr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#2B1712" stroke-width="1.6" stroke-linecap="round"/></marker>
+        </defs>
+        <style>
+          .p4dH { font: 800 12px Inter, sans-serif; fill: #2B1712; }
+          .p4dL { font: 600 12px Inter, sans-serif; fill: #2B1712; }
+          .p4dB { font: 800 11px Inter, sans-serif; fill: #0E3F4B; }
+          .p4dV { font: 800 16px Inter, sans-serif; fill: #7A1A04; }
+          .p4dW { font: 800 16px Inter, sans-serif; fill: #FFFFFF; }
+          .p4dN { font: 400 12px Inter, sans-serif; fill: #6E4A3F; }
+        </style>
+
+        <text class="p4dH" x="30" y="26">FITTING KILN'S MODEL AND CACHE ON ONE L4: THE ARITHMETIC</text>
+
+        <g filter="url(#p4dSk)" fill="none" stroke="#2B1712" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="40" y="72" width="340" height="34" rx="6" transform="rotate(-0.4 210 89)" fill="#FFFFFF"/>
+          <rect x="40" y="124" width="340" height="34" rx="6" transform="rotate(0.4 210 141)" fill="#FFFFFF"/>
+          <rect x="40" y="176" width="340" height="34" rx="6" transform="rotate(-0.4 210 193)" fill="#FFFFFF"/>
+          <rect x="40" y="228" width="340" height="34" rx="6" transform="rotate(0.4 210 245)" fill="#FFFFFF"/>
+          <rect x="40" y="280" width="340" height="34" rx="6" transform="rotate(-0.4 210 297)" fill="#FFFFFF"/>
+          <path d="M210 108 L210 122" marker-end="url(#p4dAr)"/>
+          <path d="M210 160 L210 174" marker-end="url(#p4dAr)"/>
+          <path d="M210 212 L210 226" marker-end="url(#p4dAr)"/>
+          <path d="M210 264 L210 278" marker-end="url(#p4dAr)"/>
+          <rect x="430" y="72" width="190" height="34" rx="6" fill="#FDEFE8"/>
+          <rect x="430" y="124" width="190" height="34" rx="6" fill="url(#p4dHc)"/>
+          <rect x="430" y="176" width="190" height="34" rx="6" fill="#FDEFE8"/>
+          <rect x="430" y="228" width="190" height="34" rx="6" fill="#FDEFE8"/>
+          <rect x="430" y="280" width="190" height="34" rx="6" fill="#FDEFE8"/>
+          <rect x="650" y="72" width="190" height="34" rx="6" fill="#FDEFE8"/>
+          <rect x="650" y="124" width="190" height="34" rx="6" fill="url(#p4dHc)"/>
+          <rect x="650" y="176" width="190" height="34" rx="6" fill="#FDEFE8"/>
+          <rect x="650" y="228" width="190" height="34" rx="6" fill="#FDEFE8"/>
+          <rect x="650" y="280" width="190" height="34" rx="6" transform="rotate(0.5 745 297)" fill="#145868"/>
+        </g>
+
+        <text class="p4dB" x="40" y="58">step</text>
+        <text class="p4dB" x="525" y="58" text-anchor="middle">BF16 weights</text>
+        <text class="p4dB" x="745" y="58" text-anchor="middle">FP8 weights</text>
+
+        <text class="p4dL" x="56" y="94">usable = 90% of 24 GB</text>
+        <text class="p4dL" x="56" y="146">minus the weights</text>
+        <text class="p4dL" x="56" y="198">minus the runtime reserve</text>
+        <text class="p4dL" x="56" y="250">what is left / 128 KB per token</text>
+        <text class="p4dL" x="56" y="302">/ Kiln's mean context, 1,588 tokens</text>
+
+        <text class="p4dV" x="525" y="95" text-anchor="middle">21.6 GB</text>
+        <text class="p4dV" x="525" y="147" text-anchor="middle">16.1 GB</text>
+        <text class="p4dV" x="525" y="199" text-anchor="middle">1.5 GB</text>
+        <text class="p4dV" x="525" y="251" text-anchor="middle">30,818 tokens</text>
+        <text class="p4dV" x="525" y="303" text-anchor="middle">19 requests</text>
+        <text class="p4dV" x="745" y="95" text-anchor="middle">21.6 GB</text>
+        <text class="p4dV" x="745" y="147" text-anchor="middle">8.0 GB</text>
+        <text class="p4dV" x="745" y="199" text-anchor="middle">1.5 GB</text>
+        <text class="p4dV" x="745" y="251" text-anchor="middle">92,084 tokens</text>
+        <text class="p4dW" x="745" y="303" text-anchor="middle">57 requests</text>
+
+        <text class="p4dN" x="30" y="338">Modelled, Llama 3.1 8B on an L4, BF16 KV cache, paged. The widget prints every value in this stack.</text>
+      </svg>
+      <figcaption>🔍 Click to zoom - five lines of arithmetic decide how many requests share each weight read</figcaption>
+    </figure>
+
+    <h3>The capacity widget</h3>
+    <p>It opens on the L4 with Llama 3.1 8B in BF16 at 0.25 requests a second. It prints weights in memory, KV cache per token, the KV pool, concurrent requests, decode time for one request alone and the p95 time to first token; the "Run the load sweep" button adds the max load meeting the 1 s target and its cost per 1,000 requests.</p>
+    <div class="inf-widget" data-part="capacity" data-w="bf16" data-lam="0.25"></div>
+
+    <div class="steps">
+      <div class="step">
+        <p><strong>Read the starting point, then run the sweep.</strong> L4, Llama 3.1 8B, BF16 weights, BF16 KV cache, continuous batching, paged. Write down the five memory tiles, then press "Run the load sweep".</p>
+        <div class="prompt-box good"><span class="label">★ Step 1 · L4, BF16</span>Weights in memory:     16.1 GB    (usable 21.6 GB)
+KV cache per token:    128 KB
+KV pool:               30,818 tokens   (4.0 GB left for KV)
+Concurrent requests:   19   (paged, at Kiln's mean 1,588 tokens)
+Decode, one alone:     90.4 ms/token
+Sweep: max load 0.25 req/s, $0.89 per 1,000 requests  (modelled)</div>
+      </div>
+      <div class="step">
+        <p><strong>Switch the weights to FP8 and run the sweep again.</strong> The weights halve, the pool triples, and the GPU can hold three times the requests. Watch the max load move.</p>
+        <div class="prompt-box good"><span class="label">★ Step 2 · FP8 weights</span>Weights in memory:     8.0 GB
+KV pool:               92,084 tokens
+Concurrent requests:   57
+Decode, one alone:     45.8 ms/token
+Sweep: max load 0.75 req/s, $0.30 per 1,000 requests  (modelled)</div>
+      </div>
+      <div class="step">
+        <p><strong>Turn paging off.</strong> Set KV memory to "Reserved: 4,096 tokens per slot", keep FP8 weights, and sweep. Then set it back to paged before the next step.</p>
+        <div class="prompt-box good"><span class="label">★ Step 3 · reserved against paged</span>Concurrent requests:   22   (reserved 4,096 tokens each)
+Sweep: max load 0.5 req/s, $0.44 per 1,000 requests
+Paged, same pool:      57 requests, 0.75 req/s, $0.30
+Same GPU, same weights; only the bookkeeping changed.  (modelled)</div>
+      </div>
+      <div class="step">
+        <p><strong>Store the cache in FP8 too.</strong> Keep FP8 weights and paging, set KV cache to FP8, and sweep. The requests nearly double; the max load does not move. Say out loud why (Part 3: prefill and the queue now set the first-token time).</p>
+        <div class="prompt-box good"><span class="label">★ Step 4 · FP8 weights + FP8 KV</span>KV cache per token:    64 KB
+KV pool:               184,169 tokens
+Concurrent requests:   115
+Decode, one alone:     45.2 ms/token
+Sweep: max load 0.75 req/s, $0.30 per 1,000 requests  (modelled)
+For comparison, INT4 weights with a BF16 cache: 77 requests, 0.75 req/s.</div>
+      </div>
+      <div class="step">
+        <p><strong>Try the big model.</strong> Set the GPU to H100, the model to Llama 3.1 70B, the weights to BF16 and the KV cache back to BF16. Read the verdict line. Then set the weights to INT4 weight-only and sweep.</p>
+        <div class="prompt-box good"><span class="label">★ Step 5 · 70B on one H100</span>BF16:  Does not fit: 141.1 GB of weights against 72.0 GB usable
+INT4 weight-only:
+  Weights in memory:     35.3 GB
+  KV cache per token:    320 KB
+  KV pool:               107,492 tokens
+  Concurrent requests:   67
+  Sweep: max load 0.75 req/s, $1.67 per 1,000 requests  (modelled)</div>
+      </div>
+      <div class="step">
+        <p><strong>Write Kiln's serving line.</strong> One sentence Maya can take to Theo, with the condition attached. The 8B on the L4 is the small side of the router from session 2, so the eval belongs on that easy traffic, with the model you will actually serve; the routing quality rows were measured on a different small model, Mixtral 8x7B.</p>
+        <div class="prompt-box good"><span class="label">★ Step 6 · Kiln's line</span>Small side: Llama 3.1 8B, FP8 weights, BF16 KV cache, paged,
+  on one L4: 57 requests in memory, 0.75 req/s at the 1 s target,
+  $0.30 per 1,000 requests (modelled, optimistic).
+Condition: run our own eval at FP8 on the requests the router
+  sends small, before shipping. INT4 and an FP8 cache add room,
+  not load, at our target; revisit only if the target changes.</div>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <p><strong>Your numbers will differ.</strong> Your mean context sets how many requests fit, and your latency target decides whether memory or prefill is the wall. Compute KV bytes per token from your own model's config, divide your pool by your own mean prompt plus answer, and load-test one GPU before you trust any of it.</p>
+    </div>
+  </section>
+
+  <section class="section" id="exercise">
+    <div class="section-kicker">
+      <span class="klabel">Homework</span>
+      <h2>Before session 5</h2>
+      <span class="tag exercise">30 min</span>
+    </div>
+    <ol>
+      <li><strong>Compute KV bytes per token</strong> for the model you serve or plan to serve, from its config.json: 2 x layers x KV heads x head dim x bytes. Note how many KV heads it shares across its query heads.</li>
+      <li><strong>Do the fitting arithmetic for your GPU</strong>: usable memory, minus weights, minus a runtime reserve, divided by KV per token, divided by your own mean prompt plus answer length from a week of logs.</li>
+      <li><strong>Find which limit binds for you</strong>: in the widget, set the settings nearest yours and run the sweep at two precisions. If the max load does not move, memory is not your wall.</li>
+      <li><strong>Write a quantisation eval plan</strong>: twenty to fifty of your real requests, the quality bar you already use, and the precision you would serve. Run it before you change precision, not after.</li>
+    </ol>
+  </section>
+
+  <section class="section" id="quiz">
+    <div class="section-kicker">
+      <span class="klabel">Check yourself</span>
+      <h2>Three questions</h2>
+    </div>
+    <p>Clear all three and session 4 gets stamped in your passport.</p>
+
+    <div class="quiz-q" data-answer="2">
+      <p class="qtext">1 · Qwen2.5 7B has 28 layers, 4 KV heads and a head dimension of 128. In BF16, how many bytes of KV cache does one token take?</p>
+      <button class="qopt" type="button">A · 128 KB, the same as every 7B-class model</button>
+      <button class="qopt" type="button">B · 320 KB, because it counts all 28 query heads</button>
+      <button class="qopt" type="button">C · 56 KB: 2 x 28 x 4 x 128 x 2 bytes</button>
+      <button class="qopt" type="button">D · 800 KB, as in the PagedAttention example</button>
+      <p class="qwhy">The formula counts key and value (2), layers, KV heads (not query heads), head dimension and bytes per number. For Qwen2.5 7B that is 56 KB, under half of Llama 3.1 8B's 128 KB because it shares 4 KV heads instead of 8.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="0">
+      <p class="qtext">2 · With the same FP8 weights and the same 92,084-token pool on an L4, why does paged KV memory hold 57 requests where reserved slots hold 22?</p>
+      <button class="qopt" type="button">A · Reserved mode sets aside 4,096 tokens per request whether it uses them or not; paging hands out blocks only as each request's tokens arrive</button>
+      <button class="qopt" type="button">B · Paging compresses the keys and values to fewer bytes</button>
+      <button class="qopt" type="button">C · Paging moves the KV cache to CPU memory</button>
+      <button class="qopt" type="button">D · Paging makes each decode step faster, so requests finish sooner</button>
+      <p class="qwhy">Bytes per token are unchanged; what changes is the bookkeeping. Kwon et al. found earlier systems used only 20.4% - 38.2% of KV memory for actual token states. Paging stops empty reservations from blocking new requests, so more of them share each weight read.</p>
+    </div>
+
+    <div class="quiz-q" data-answer="3">
+      <p class="qtext">3 · What did Kurtic et al. (2024) report for INT4 weight-only quantisation on the Llama-3.1 family?</p>
+      <button class="qopt" type="button">A · It is effectively lossless at every scale, like FP8</button>
+      <button class="qopt" type="button">B · It loses too much accuracy to serve</button>
+      <button class="qopt" type="button">C · It only works with an FP8 KV cache</button>
+      <button class="qopt" type="button">D · It is "more competitive than expected, rivaling 8-bit"</button>
+      <p class="qwhy">The paper calls FP8 "effectively lossless", puts well-tuned INT8 at 1-3% degradation, and says INT4 weight-only is "more competitive than expected, rivaling 8-bit". Practitioners still see task-specific drops, so run your own eval at the precision you serve.</p>
+    </div>
+
+    <p class="quiz-score"></p>
+  </section>
+
+  <section class="section" id="official">
+    <div class="section-kicker">
+      <span class="klabel">Sources covered</span>
+      <h2>What this session teaches, and where it came from</h2>
+    </div>
+    <div class="covered">
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Kwon et al. 2023, PagedAttention (SOSP 2023, arXiv:2309.06180)</span><span class="note">20.4% - 38.2% of KV memory used in earlier systems; near-zero waste; 2-4x throughput; the OPT-13B 800 KB per token example</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Kurtic et al. 2024, "Give Me BF16 or Give Me Death"? (ACL 2025, arXiv:2411.02355)</span><span class="note">FP8, INT8 and INT4 weight-only accuracy on Llama-3.1; abstract read at source, body tables not read</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Lin et al. 2023, AWQ (MLSys 2024, arXiv:2306.00978)</span><span class="note">Protecting 1% salient weights; abstract read at source</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Frantar et al. 2022, GPTQ (ICLR 2023, arXiv:2210.17323)</span><span class="note">175B quantised to 3 or 4 bits in about four GPU hours; abstract read at source</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">vLLM docs: quantization, engine arguments, PagedAttention design page</span><span class="note">Supported formats; <code>--gpu-memory-utilization</code> default 0.92; the design page marked "a historical document"; read 2026-11-08, re-verify</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">NVIDIA TensorRT-LLM overview</span><span class="note">Paged KV cache with block reuse; FP8 halving memory against 16-bit</span></div>
+      <div class="covered-row"><span class="status pill solid">✓</span><span class="name">Llama 3.1 8B and 70B, Qwen2.5 7B config.json via Hugging Face</span><span class="note">Layers, KV heads and head dims for the KV formula; Llama read from the unsloth mirror because meta-llama is gated</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">DeepLearning.AI, Quantization Fundamentals with Hugging Face; Quantization in Depth</span><span class="note">The number formats by hand; videos and certificates stay with the official short courses</span></div>
+      <div class="covered-row"><span class="status pill light">◐</span><span class="name">The capacity model, and Kiln</span><span class="note">Roofline plus a seeded queue, optimistic against vLLM's reported 13 ms per token; Kiln, Maya and Theo constructed for teaching</span></div>
+    </div>
+    <p class="mono" style="margin-top:14px">Every fact on this page, and its verification tier, is recorded in the course's source map.</p>
+  </section>
+
+  <section class="cheat" id="cheatsheet">
+    <h3>Session 4 cheat sheet <span>· pin this</span></h3>
+    <div class="grid-2">
+      <div class="cheat-item"><b>KV per token</b><span>2 x layers x KV heads x head dim x bytes. Llama 3.1 8B in BF16: 128 KB.</span></div>
+      <div class="cheat-item"><b>The fitting sum</b><span>Usable memory, minus weights, minus reserve, divided by KV per token, divided by mean context.</span></div>
+      <div class="cheat-item"><b>Page, do not reserve</b><span>Blocks as tokens arrive. Same pool on an L4 with FP8 weights: 57 requests against 22 (modelled).</span></div>
+      <div class="cheat-item"><b>Smaller weights</b><span>BF16 2 bytes, FP8 and INT8 1, INT4 weight-only half. The freed memory becomes KV pool.</span></div>
+      <div class="cheat-item"><b>Find the wall</b><span>If more room does not raise max load, the limit is prefill and the queue, not memory.</span></div>
+      <div class="cheat-item"><b>The quality bill</b><span>Papers say FP8 is near-lossless and INT4 rivals 8-bit. Your task may differ: eval at the precision you serve.</span></div>
+    </div>
+  </section>
+
+  <div class="callout next">
+    <span class="nx-pill">Next session</span>
+    <p>Kiln's first tokens are now late because every request re-reads the same 1,200-token system prompt. Session 5 stops paying for that repeat twice: provider prompt caches, KV prefix reuse on your own GPU, and an answer cache, each with its own hit rate and its own way to go wrong.</p>
+  </div>
+
+  <footer class="pagefoot">
+    <span>Session 4 of 6 · learn-llm-inference-with-phoebe · by Phoebe Fu &nbsp;·&nbsp; 📚 <a href="https://phoebefu6.github.io/learn-with-phoebe/">Learn with Phoebe ↗</a></span>
+    <span><a href="03-batching.html">← Prev: Batching</a> &nbsp;·&nbsp; <a href="05-caching-as-a-cost-lever.html">Next: Caching as a cost lever →</a></span>
+  </footer>
+
+</main>
+
+<script src="../assets/inf-sample.js?v=1"></script>
+<script src="../assets/inf-live.js?v=1"></script>
+<script src="../assets/inf-ui.js?v=3"></script>
+<script src="../assets/app.js?v=1"></script>
+</body>
+</html>
